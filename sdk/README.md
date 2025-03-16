@@ -1,41 +1,39 @@
 # Nexus SDK
 
-A simple, misuse-resistant SDK for programmatic use of the Nexus zkVM.
+The Nexus SDK provides simple, misuse-resistant programmatic use of the Nexus zkVM.
 
 ## Quick Start
 
 ### 1. Install the Nexus zkVM
 
-First, install Rust: https://www.rust-lang.org/tools/install.
-
-Also, make sure you have a working version of [cmake](https://cmake.org/).
+First, install Rust: [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
 
 Next, install the RISC-V target:
 
 ```shell
-rustup target add riscv32i-unknown-none-elf
+$ rustup target add riscv32i-unknown-none-elf
 ```
 
 Then, install the Nexus zkVM:
 
 ```shell
-cargo install --git https://github.com/nexus-xyz/nexus-zkvm cargo-nexus --tag 'v0.2.4'
+$ rustup run nightly-2025-01-02 cargo install --git https://github.com/nexus-xyz/nexus-zkvm cargo-nexus --tag 'v0.3.1'
 ```
 
-Verify the installation:
+And verify the installation:
 
 ```shell
-cargo nexus --help
+$ rustup run nightly-2025-01-02 cargo nexus --help
 ```
 
-This should print the available CLI commands.
+This should print the available CLI commands. At present, the `cargo nexus` CLI is minimal, providing just a `cargo nexus host` command to setup an SDK based project.
 
 ### 2. Create a new Nexus host project
 
-To use the zkVM programmatically, we need two programs: a _guest_ program that runs on the zkVM, and a _host_ program that operates the zkVM itself.
+To use the zkVM programmatically, we need two programs: a _guest_ program that runs on the zkVM, and a _host_ program that operates the zkVM itself. Run:
 
 ```shell
-cargo nexus host nexus-host
+$ rustup run nightly-2025-01-02 cargo nexus host nexus-host
 ```
 
 This will create a new Rust project directory with the following structure:
@@ -43,173 +41,125 @@ This will create a new Rust project directory with the following structure:
 ```shell
 ./nexus-host
 ├── Cargo.lock
-├── Cargo.toml
+├── Cargo.tom
+├── rust-toolchain.toml
 └── src
-    └── main.rs
+    ├── main.rs
     └── guest
-        └── Cargo.toml
-        └── rust-toolchain.toml
+        ├── Cargo.toml
+        ├── rust-toolchain.toml
         └── src
             └── main.rs
 ```
 
 Here, `./src/main.rs` is our host program, while `./src/guest/src/main.rs` is our guest program.
 
-As an example, you can change the content of `./src/guest/src/main.rs` to:
+As a slightly more interesting example than the default Hello, World! program, you can change the content of `./src/guest/src/main.rs` to:
 
 ```rust
 #![cfg_attr(target_arch = "riscv32", no_std, no_main)]
 
-use nexus_rt::{println, read_private_input, write_output};
+use nexus_rt::println;
 
 #[nexus_rt::main]
-fn main() {
-    let input = read_private_input::<(u32, u32)>();
+#[nexus_rt::public_input(x)]
+fn main(x: u32, y: u32) -> u32 {
+    println!("Read public input:  {}", x);
+    println!("Read private input: {}", y);
 
-    let mut z: i32 = -1;
-    if let Ok((x, y)) = input {
-        println!("Read private input: ({}, {})", x, y);
-
-        z = (x * y) as i32;
-    } else {
-        println!("No private input provided...");
-    }
-
-    write_output::<i32>(&z)
+    x * y
 }
 ```
 
-This guest program tries to read two integers off the input tape, logs whether they exist, and then returns their product if they do.
+This guest program takes as input two integers, one public and one private, logs their values, and then returns their product.
 
 Then, change the content of `./src/main.rs` to:
 
 ```rust
 use nexus_sdk::{
-    compile::CompileOpts,
-    nova::seq::{Generate, Nova, PP},
-    Local, Prover, Verifiable,
+    compile::{cargo::CargoPackager, Compile, Compiler},
+    stwo::seq::Stwo,
+    ByGuestCompilation, Local, Prover, Verifiable, Viewable,
 };
-
-type Input = (u32, u32);
-type Output = i32;
 
 const PACKAGE: &str = "guest";
 
 fn main() {
-    println!("Setting up Nova public parameters...");
-    let pp: PP = PP::generate().expect("failed to generate parameters");
-
-    let mut opts = CompileOpts::new(PACKAGE);
-    opts.set_memlimit(8); // use an 8mb memory
-
     println!("Compiling guest program...");
-    let prover: Nova<Local> = Nova::compile(&opts).expect("failed to compile guest program");
+    let mut prover_compiler = Compiler::<CargoPackager>::new(PACKAGE);
+    let prover: Stwo<Local> =
+        Stwo::compile(&mut prover_compiler).expect("failed to compile guest program");
 
-    let input: Input = (3, 5);
+    let elf = prover.elf.clone(); // save elf for use with test verification
 
-    print!("Proving execution of vm...");
-    let proof = prover
-        .prove_with_input::<Input>(&pp, &input)
-        .expect("failed to prove program");
+    print!("Proving execution of vm... ");
+    let (view, proof) = prover
+        .prove_with_input::<u32, u32>(&3, &5)
+        .expect("failed to prove program"); // x = 5, y = 3
 
+    assert_eq!(view.exit_code().expect("failed to retrieve exit code"), 0);
+
+    let output: u32 = view
+        .public_output::<u32>()
+        .expect("failed to retrieve public output");
+    assert_eq!(output, 15); // z = 15
+
+    println!("output is {}!", output);
     println!(
-        " output is {}!",
-        proof
-            .output::<Output>()
-            .expect("failed to deserialize output")
+        ">>>>> Logging\n{}<<<<<",
+        view.logs().expect("failed to retrieve debug logs").join("")
     );
 
-    println!(">>>>> Logging\n{}<<<<<", proof.logs().join("\n"));
-
     print!("Verifying execution...");
-    proof.verify(&pp).expect("failed to verify proof");
+    proof
+        .verify_expected::<u32, u32>(
+            &5,   // x = 5
+            0,    // exit code = 0
+            &15,  // z = 15
+            &elf, // expected elf (program binary)
+            &[],  // no associated data,
+        )
+        .expect("failed to verify proof");
 
     println!("  Succeeded!");
 }
 ```
 
-This host program compiles the guest program with a custom memory limit, and then invokes the resultant binary with `(3, 5)` as the input.
+This host program compiles the guest program and then invokes the resultant binary with public input `x = 5` and private input `y = 3`.
 
-The zkVM will then run the guest program and produce a proof of its correct execution.
+The zkVM will then run the guest program, return a view containing the output (`z = 15`) and logs, and produce a proof of its correct execution.
 
-After the proving completes, the host program then reads the output off the output tape and prints it, along with any logs, and then verifies the proof.
+After the proving completes, the host program then reads the output out of the view, checks it and prints it along with any logs, and then verifies the proof.
 
 ### 3. Run your program
 
-```bash
-cargo run -r
-```
+Next, we can run the host program (including executing and proving the guest program) with:
 
-Notice that we use `cargo run`, rather than `cargo nexus run`. Our host program is just a normal Rust program, whereas `cargo nexus run` is used to execute guest programs from the command line.
+```bash
+$ cargo run -r
+```
 
 You should see the host program print:
 
 ```
-Setting up Nova public parameters...
 Proving execution of vm... output is 15!
 >>>>> Logging
-Read private input: (3, 5)
+Read public input:  5
+Read private input: 3
 <<<<<
 Verifying execution...  Succeeded!
 ```
 
-If you want to execute guest programs from the command line, you can navigate into `./src/guest` and then use `cargo nexus` commands to do so.
-
-### 4. Other host program options
-
-There are a few ways to configure how the guest program is run and proven. Perhaps most importantly, the SDK supports two alternative provers: HyperNova and Jolt.
-
-To use HyperNova, just use the example above, replacing `nova` with `hypernova` in the program.
-
-Jolt support is experimental, and in particular does not currently allow inputs, outputs, logging, or assertions in the guest program. You can test it using a guest program like
-
-```rust
-#![no_std]
-#![no_main]
-
-fn fib(n: u32) -> u32 {
-    match n {
-        0 => 0,
-        1 => 1,
-        _ => fib(n - 1) + fib(n - 2),
-    }
-}
-
-#[nexus_rt::main]
-fn main() {
-    let n = 10;
-    let result = fib(n);
-    core::hint::black_box(result);
-}
-```
-
-and a host program like
-
-```rust
-use nexus_sdk::{compile::CompileOpts, jolt::Jolt, Local};
-
-const PACKAGE: &str = "guest";
-
-fn main() {
-    let opts = CompileOpts::new(PACKAGE);
-
-    // defaults to local proving
-    let prover: Jolt<Local> = Jolt::compile(&opts).expect("failed to load program");
-
-    println!("Proving execution of vm...");
-    let proof = prover.prove().expect("failed to prove program");
-
-    print!("Verifying execution...");
-    proof.verify().expect("failed to verify proof");
-
-    println!("  Succeeded!");
-}
-```
-
 To see more example of using the SDK, check out [the examples folder](./examples/).
+
+### 4. Run in legacy mode
+
+In addition the Stwo-based Nexus zkVM 3.0 prover, the SDK also supports a _legacy mode_ that uses the Nova, HyperNova, and (experimentally) Jolt-based Nexus zkVM 2.0 machine. This machine uses a different runtime and requires additional configuration on the host side due to the use of public parameters and reference strings.
+
+To use the legacy mode, you must first activate the appropriate feature for the `nexus-sdk` dependency in the host program: `legacy-nova`, `legacy-hypernova`, or `legacy-jolt`. Examples of using legacy mode to prove [legacy guest programs](../examples/legacy) are provided in [the examples folder](./examples/).
+
+To review the code used in the legacy mode, it corresponds to the [Nexus zkVM v0.2.4 release](https://github.com/nexus-xyz/nexus-zkvm/tree/releases/0.2.4).
 
 ## Learn More
 
-Also check out the documentation at [docs.nexus.xyz](https://docs.nexus.xyz), or join our [Telegram](https://t.me/nexus_zkvm) chat to discuss!
-
-Nexus is committed to open-source. All of our code is dual licensed under MIT and Apache licenses. We encourage and appreciate contributions.
+See our zkVM documentation, including guides and walkthroughs, at [docs.nexus.xyz](https://docs.nexus.xyz/zkvm/index). Our SDK package documentation can be viewed at [sdk-docs.nexus.xyz](https://sdk-docs.nexus.xyz).

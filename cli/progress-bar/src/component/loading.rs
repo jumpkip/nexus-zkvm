@@ -61,6 +61,9 @@ impl Component for LoadingBar<'_> {
 
 impl<'a> LoadingBar<'a> {
     pub fn new(action: &'a RefCell<Action>) -> Self {
-        Self { action, time_spent: Duration::ZERO }
+        Self {
+            action,
+            time_spent: Duration::ZERO,
+        }
     }
 }

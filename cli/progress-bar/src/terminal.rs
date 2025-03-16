@@ -52,12 +52,19 @@ impl TerminalHandle {
     pub fn context(&mut self, step_header: &'static str) -> TerminalContext<'_> {
         let _ = self.0.as_mut().map(|handle| handle.ctx_sender.take());
         let action = if self.0.is_some() {
-            Some(Action { step_header, ..Default::default() })
+            Some(Action {
+                step_header,
+                ..Default::default()
+            })
         } else {
             None
         };
 
-        TerminalContext { term: self, action, steps_left: 1 }
+        TerminalContext {
+            term: self,
+            action,
+            steps_left: 1,
+        }
     }
 }
 
@@ -81,9 +88,10 @@ impl TerminalContext<'_> {
     pub fn num_steps(self, num_steps: usize) -> Self {
         assert!(num_steps > 0);
         Self {
-            action: self
-                .action
-                .map(|action| Action { iter_num: num_steps, ..action }),
+            action: self.action.map(|action| Action {
+                iter_num: num_steps,
+                ..action
+            }),
             steps_left: num_steps,
             ..self
         }
@@ -104,9 +112,10 @@ impl TerminalContext<'_> {
 
     pub fn completion_header(self, completion_header: &'static str) -> Self {
         Self {
-            action: self
-                .action
-                .map(|action| Action { completion_header, ..action }),
+            action: self.action.map(|action| Action {
+                completion_header,
+                ..action
+            }),
             ..self
         }
     }

@@ -35,7 +35,10 @@ impl ThreadHandle {
 
 impl Drop for ThreadHandle {
     fn drop(&mut self) {
-        let Self { sender, join_handle } = self;
+        let Self {
+            sender,
+            join_handle,
+        } = self;
         // SAFETY: struct fields are inaccessible once `drop` returns.
         unsafe { ManuallyDrop::drop(sender) };
         let join_handle = unsafe { ManuallyDrop::take(join_handle) };

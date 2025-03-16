@@ -38,14 +38,11 @@ pub enum Cli {
     },
 }
 
-const LOG_TARGET: &str = "nexus-cli";
-
 pub fn setup_logger() -> tracing::subscriber::DefaultGuard {
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::WARN.into())
         .from_env()
-        .unwrap()
-        .add_directive("r1cs=off".parse().unwrap());
+        .unwrap();
 
     tracing_subscriber::registry()
         .with(
@@ -60,7 +57,7 @@ pub fn setup_logger() -> tracing::subscriber::DefaultGuard {
         .set_default()
 }
 
-/// Default environment variables for prover configuration.
+/// Default environment variables for legacy prover configuration.
 const ENV: &str = r#"
 NEXUS_VM_K=16
 NEXUS_VM_PROVER=nova-seq

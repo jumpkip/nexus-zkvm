@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::{ecall, SYS_ALLOC_ALIGNED};
+
 // Minimum gap between heap and stack
 const MEMORY_GAP: usize = 0x1000;
 
@@ -32,7 +34,13 @@ pub unsafe extern "C" fn sys_alloc_aligned(bytes: usize, align: usize) -> *mut u
     let mut heap_pos = HEAP_POS;
 
     if heap_pos == 0 {
-        heap_pos = &_end as *const u8 as usize;
+        // Check to see if vm has a different place we should expect the heap to be.
+        let overwrite = ecall!(SYS_ALLOC_ALIGNED);
+        if overwrite > 0 {
+            heap_pos = overwrite as usize;
+        } else {
+            heap_pos = &_end as *const u8 as usize;
+        }
     }
 
     let offset = heap_pos & (align - 1);

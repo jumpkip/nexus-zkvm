@@ -8,94 +8,93 @@ on:
       - main
 
 jobs:
-  check-fmt:
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: stable
-      - run: cargo fmt --all --check
-      - run: cd nova-benches && cargo fmt --check
+          components: rustfmt
+          toolchain: nightly-2025-01-02
 
-  check-build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          target: riscv32i-unknown-none-elf
-      - run: cargo check --all-features
-      - run: cargo check --all-features --examples
-      - run: cargo check -p example --target=riscv32i-unknown-none-elf
-      - run: cd nova-benches && cargo check --benches
-
-  cargo-clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-      - run: cargo clippy --all-targets --all-features
-
-  test:
-    needs: check-build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-      - run: cargo test -r --all-features
-
-  test-smoke:
-    needs: check-build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup target add riscv32i-unknown-none-elf
-      - run: assets/scripts/smoke.sh examples/src/bin/fib3_profiling.rs
-
-  test-sdk:
-    needs: check-build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup target add riscv32i-unknown-none-elf
-      - run: assets/scripts/test_sdk.sh examples/src/bin/fib3_profiling.rs
-
-  detect-unused-crate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: bnjbvr/cargo-machete@main
-
-  bench-riscv:
-    runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'benchmark')
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install valgrind
-        run: sudo apt-get install -y valgrind
-      - name: Install iai-callgrind-runner
+      - name: Run `cargo fmt`
         run: |
-            version=$(cargo metadata --format-version=1 |\
-            jq '.packages[] | select(.name == "iai-callgrind").version' |\
-            tr -d '"'
-            )
-            cargo install iai-callgrind-runner --version $version
-      - name: Run benchmarks
-        run: |
-            cargo bench --bench riscv_machine
+          cargo fmt --all --check
+          cd prover-benches && cargo fmt --check
 
-  bench-nova-public-params:
+  check-and-clippy:
     runs-on: ubuntu-latest
-    if: contains(github.event.pull_request.labels.*.name, 'benchmark')
     steps:
       - uses: actions/checkout@v4
-      - name: Run benchmarks
-        run: |
-            cd nova-benches/
-            cargo bench --bench nova_public_parameter_generation
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: "true"
+          cache-on-failure: "true"
+
+      - name: Install & Use `mold`
+        uses: rui314/setup-mold@v1
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          components: clippy
+          toolchain: nightly-2025-01-02
+          targets: riscv32i-unknown-none-elf
+
+      - name: Add clippy
+        run: rustup component add clippy
+
+      - name: Make Warnings Errors
+        run: echo "RUSTFLAGS=-D warnings" >> $GITHUB_ENV
+
+      - name: Run `cargo check`
+        run: |
+          cargo check --all-features --all-targets --workspace --exclude example
+          cargo check --all-features --all-targets --examples --workspace --exclude example
+          cargo check --package example --target riscv32i-unknown-none-elf
+          cd prover-benches && cargo check --benches --workspace
+
+      - name: Run `cargo clippy`
+        run: cargo clippy --no-deps --all-targets --all-features
+
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        crate: [nexus-common, nexus-vm, nexus-vm-prover, testing-framework, nexus-precompiles]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: "true"
+          cache-on-failure: "true"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-01-02
+          targets: riscv32i-unknown-none-elf
+
+      - name: Install cargo-expand
+        run: cargo install cargo-expand --locked --version 1.0.95 # blocked on upgrading rust; might involve upgrading stwo-prover
+
+      - uses: taiki-e/install-action@nextest
+
+      - name: Install & Use `mold`
+        uses: rui314/setup-mold@v1
+
+      - name: Make Warnings Errors
+        run: echo "RUSTFLAGS=-D warnings" >> $GITHUB_ENV
+
+      - name: Build VM Guest Binaries
+        run: echo "NEXUS_VM_BUILD_GUEST_TEST_BINARIES=true" >> $GITHUB_ENV
+
+      - name: Run tests for ${{ matrix.crate }}
+        run: cargo nextest run --package ${{ matrix.crate }} --cargo-profile ci-test --all-features --test-threads num-cpus
+
+      - name: Run doc tests for ${{ matrix.crate }}
+        run: cargo test --package ${{ matrix.crate }} --doc

@@ -15,10 +15,11 @@ use crate::{
         OpC16_23, OpC24_31, Pc, PcNextAux, PrevCtr, ProgCtrCur, ProgCtrPrev, Qt, Ram1TsPrev,
         Ram1TsPrevAux, Ram1ValCur, Ram1ValPrev, Ram2TsPrev, Ram2TsPrevAux, Ram2ValCur, Ram2ValPrev,
         Ram3TsPrev, Ram3TsPrevAux, Ram3ValCur, Ram3ValPrev, Ram4TsPrev, Ram4TsPrevAux, Ram4ValCur,
-        Ram4ValPrev, RamBaseAddr, RamFinalCounter, RamFinalValue, RamInitFinalAddr, Reg1TsPrev,
-        Reg2TsPrev, Reg3TsPrev, Rem, RemDiff, ValueA, ValueB, ValueC,
+        Ram4ValPrev, RamBaseAddr, Reg1TsPrev, Reg2TsPrev, Reg3TsPrev, Rem, RemDiff, ValueA, ValueB,
+        ValueC,
     },
     components::AllLookupElements,
+    extensions::ExtensionsConfig,
     trace::{
         eval::TraceEval, program_trace::ProgramTraces, sidenote::SideNote, FinalizedTraces,
         PreprocessedTraces, ProgramStep, TracesBuilder,
@@ -36,7 +37,7 @@ const LOOKUP_TUPLE_SIZE: usize = 1;
 stwo_prover::relation!(Range256LookupElements, LOOKUP_TUPLE_SIZE);
 
 impl Range256Chip {
-    const CHECKED_WORDS: [Column; 31] = [
+    const CHECKED_WORDS: [Column; 29] = [
         Pc,
         PcNextAux,
         InstrVal,
@@ -66,11 +67,9 @@ impl Range256Chip {
         Rem,
         Qt,
         RemDiff,
-        RamInitFinalAddr,
-        RamFinalCounter,
     ];
 
-    const CHECKED_BYTES: [Column; 9] = [
+    const CHECKED_BYTES: [Column; 8] = [
         Ram1ValCur,
         Ram2ValCur,
         Ram3ValCur,
@@ -79,7 +78,6 @@ impl Range256Chip {
         Ram2ValPrev,
         Ram3ValPrev,
         Ram4ValPrev,
-        RamFinalValue,
     ];
 
     const TYPE_U_CHECKED_BYTES: [Column; 2] = [OpC16_23, OpC24_31];
@@ -89,6 +87,7 @@ impl MachineChip for Range256Chip {
     fn draw_lookup_elements(
         all_elements: &mut AllLookupElements,
         channel: &mut impl stwo_prover::core::channel::Channel,
+        _config: &ExtensionsConfig,
     ) {
         all_elements.insert(Range256LookupElements::draw(channel));
     }
@@ -99,6 +98,7 @@ impl MachineChip for Range256Chip {
         row_idx: usize,
         _step: &Option<ProgramStep>,
         side_note: &mut SideNote,
+        _config: &ExtensionsConfig,
     ) {
         // This chip needs to wait till every other chip finishes writing bytes.
         // Since some other chips write bytes above the current row, we need to wait till other chips finished filling for the last row.
@@ -181,6 +181,7 @@ impl MachineChip for Range256Chip {
         eval: &mut E,
         trace_eval: &TraceEval<E>,
         lookup_elements: &AllLookupElements,
+        _config: &ExtensionsConfig,
     ) {
         let lookup_elements: &Range256LookupElements = lookup_elements.as_ref();
 
@@ -255,11 +256,11 @@ mod test {
 
     use crate::extensions::ExtensionComponent;
     use crate::test_utils::{assert_chip, commit_traces, test_params, CommittedTraces};
-    use crate::trace::program_trace::ProgramTracesBuilder;
+    use crate::trace::program_trace::{ProgramTraceRef, ProgramTracesBuilder};
     use crate::trace::{preprocessed::PreprocessedBuilder, Word};
     use crate::traits::MachineChip;
 
-    use nexus_vm::emulator::{Emulator, HarvardEmulator};
+    use nexus_vm::emulator::{Emulator, HarvardEmulator, ProgramInfo};
 
     use stwo_prover::core::fields::m31::BaseField;
 
@@ -282,6 +283,7 @@ mod test {
                 row_idx,
                 &Some(ProgramStep::default()),
                 &mut side_note,
+                &ExtensionsConfig::default(),
             );
         }
         assert_chip::<Range256Chip>(traces, None);
@@ -292,7 +294,14 @@ mod test {
         const LOG_SIZE: u32 = PreprocessedBuilder::MIN_LOG_SIZE;
         let (config, twiddles) = test_params(LOG_SIZE);
         let mut traces = TracesBuilder::new(LOG_SIZE);
-        let program_traces = ProgramTracesBuilder::dummy(LOG_SIZE);
+        let program_info = ProgramInfo::dummy();
+        let program_trace_ref = ProgramTraceRef {
+            program_memory: &program_info,
+            init_memory: Default::default(),
+            exit_code: Default::default(),
+            public_output: Default::default(),
+        };
+        let program_traces = ProgramTracesBuilder::new(LOG_SIZE, program_trace_ref);
         let mut side_note = SideNote::new(&program_traces, &HarvardEmulator::default().finalize());
         // Write in-range values to ValueA columns.
         for row_idx in 0..traces.num_rows() {
@@ -307,6 +316,7 @@ mod test {
                 row_idx,
                 &Some(ProgramStep::default()),
                 &mut side_note,
+                &ExtensionsConfig::default(),
             );
         }
         // modify looked up value
@@ -320,7 +330,13 @@ mod test {
 
         // verify that logup sums don't match
         let ext = ExtensionComponent::multiplicity256();
-        let (_, claimed_sum_2) = ext.generate_interaction_trace(&side_note, &lookup_elements);
+        let component_trace = ext.generate_component_trace(
+            256u32.trailing_zeros(),
+            program_trace_ref,
+            &mut side_note,
+        );
+        let (_, claimed_sum_2) =
+            ext.generate_interaction_trace(component_trace, &side_note, &lookup_elements);
         assert_ne!(claimed_sum + claimed_sum_2, SecureField::zero());
     }
 }

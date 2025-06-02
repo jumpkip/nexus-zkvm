@@ -17,13 +17,13 @@ use stwo_prover::{
 use crate::{
     chips::instructions::bit_op::{BitOp, BitOpLookupElements},
     components::AllLookupElements,
-    trace::sidenote::SideNote,
+    trace::{program_trace::ProgramTraceRef, sidenote::SideNote},
 };
 
-use super::{BuiltInExtension, FrameworkEvalExt};
+use super::{BuiltInExtension, ComponentTrace, FrameworkEvalExt};
 
 /// A component that yields logup sum emitted by the bitwise chip.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BitOpMultiplicity {
     _private: (),
 }
@@ -38,17 +38,9 @@ pub(crate) struct BitOpMultiplicityEval {
     lookup_elements: BitOpLookupElements,
 }
 
-impl Default for BitOpMultiplicityEval {
-    fn default() -> Self {
-        Self {
-            lookup_elements: BitOpLookupElements::dummy(),
-        }
-    }
-}
-
 impl BitOpMultiplicityEval {
     // There are (2 ** 4) ** 2 = 256 combinations for each looked up pair.
-    const LOG_SIZE: u32 = 8;
+    pub(crate) const LOG_SIZE: u32 = 8;
 }
 
 impl FrameworkEval for BitOpMultiplicityEval {
@@ -102,12 +94,17 @@ impl FrameworkEval for BitOpMultiplicityEval {
 }
 
 impl FrameworkEvalExt for BitOpMultiplicityEval {
-    const LOG_SIZE: u32 = BitOpMultiplicityEval::LOG_SIZE;
-
-    fn new(lookup_elements: &AllLookupElements) -> Self {
+    fn new(log_size: u32, lookup_elements: &AllLookupElements) -> Self {
+        assert_eq!(log_size, Self::LOG_SIZE);
         let lookup_elements: &BitOpLookupElements = lookup_elements.as_ref();
         Self {
             lookup_elements: lookup_elements.clone(),
+        }
+    }
+    fn dummy(log_size: u32) -> Self {
+        assert_eq!(log_size, Self::LOG_SIZE);
+        Self {
+            lookup_elements: BitOpLookupElements::dummy(),
         }
     }
 }
@@ -115,7 +112,30 @@ impl FrameworkEvalExt for BitOpMultiplicityEval {
 impl BuiltInExtension for BitOpMultiplicity {
     type Eval = BitOpMultiplicityEval;
 
+    fn generate_component_trace(
+        &self,
+        log_size: u32,
+        _: ProgramTraceRef,
+        side_note: &mut SideNote,
+    ) -> ComponentTrace {
+        let preprocessed_trace = Self::preprocessed_base_columns();
+        let original_trace = Self::base_columns(side_note);
+
+        ComponentTrace {
+            log_size,
+            preprocessed_trace,
+            original_trace,
+        }
+    }
+
+    fn compute_log_size(&self, _side_note: &SideNote) -> u32 {
+        BitOpMultiplicityEval::LOG_SIZE
+    }
+
     fn generate_preprocessed_trace(
+        &self,
+        _log_size: u32,
+        _program_trace_ref: ProgramTraceRef,
     ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
         let base_cols = Self::preprocessed_base_columns();
         let domain = CanonicCoset::new(BitOpMultiplicityEval::LOG_SIZE).circle_domain();
@@ -125,29 +145,15 @@ impl BuiltInExtension for BitOpMultiplicity {
             .collect()
     }
 
-    fn preprocessed_trace_sizes() -> Vec<u32> {
+    fn preprocessed_trace_sizes(_log_size: u32) -> Vec<u32> {
         // preprocessed column for each of [and, or, xor] with 2 input lookups
-        std::iter::repeat(BitOpMultiplicityEval::LOG_SIZE)
-            .take(5)
-            .collect()
-    }
-
-    /// Contains multiplicity column for each of [and, or, xor]
-    ///
-    /// The ordering of rows is the same as the ordering of the preprocessed value column.
-    fn generate_original_trace(
-        side_note: &SideNote,
-    ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
-        let base_cols = Self::base_columns(side_note);
-        let domain = CanonicCoset::new(BitOpMultiplicityEval::LOG_SIZE).circle_domain();
-        base_cols
-            .into_iter()
-            .map(|col| CircleEvaluation::new(domain, col))
-            .collect()
+        vec![BitOpMultiplicityEval::LOG_SIZE; 5]
     }
 
     fn generate_interaction_trace(
-        side_note: &SideNote,
+        &self,
+        component_trace: ComponentTrace,
+        _side_note: &SideNote,
         lookup_elements: &AllLookupElements,
     ) -> (
         ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
@@ -157,15 +163,12 @@ impl BuiltInExtension for BitOpMultiplicity {
         let mut logup_trace_gen = LogupTraceGenerator::new(BitOpMultiplicityEval::LOG_SIZE);
 
         // Subtract looked up multiplicities from logup sum
-        let preprocessed_columns = Self::preprocessed_base_columns();
-        let base_columns = Self::base_columns(side_note);
+        let preprocessed_columns = &component_trace.preprocessed_trace;
+        let base_columns = &component_trace.original_trace;
 
-        let [answer_b, answer_c, answer_a_and, answer_a_or, answer_a_xor] = preprocessed_columns
-            .try_into()
-            .expect("invalid number of preprocessed columns");
-        let [mult_and, mult_or, mult_xor] = base_columns
-            .try_into()
-            .expect("invalid number of columns in original trace");
+        let [answer_b, answer_c, answer_a_and, answer_a_or, answer_a_xor] =
+            std::array::from_fn(|i| &preprocessed_columns[i]);
+        let [mult_and, mult_or, mult_xor] = std::array::from_fn(|i| &base_columns[i]);
 
         for (op_type, answer_a, mult) in [
             (BitOp::And, &answer_a_and, &mult_and),

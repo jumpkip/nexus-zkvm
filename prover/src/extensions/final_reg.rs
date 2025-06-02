@@ -10,6 +10,7 @@ use stwo_prover::{
         backend::simd::{
             column::BaseColumn,
             m31::{PackedBaseField, PackedM31, LOG_N_LANES},
+            qm31::PackedSecureField,
             SimdBackend,
         },
         fields::{m31::BaseField, qm31::SecureField},
@@ -24,10 +25,10 @@ use stwo_prover::{
 use crate::{
     chips::memory_check::register_mem_check::RegisterCheckLookupElements,
     components::AllLookupElements,
-    trace::{sidenote::SideNote, utils::IntoBaseFields},
+    trace::{program_trace::ProgramTraceRef, sidenote::SideNote, utils::IntoBaseFields},
 };
 
-use super::{BuiltInExtension, FrameworkEvalExt};
+use super::{BuiltInExtension, ComponentTrace, FrameworkEvalExt};
 
 /// A column with {0, ..., 31}
 #[derive(Debug, Clone)]
@@ -46,7 +47,7 @@ impl RegisterIdx {
 }
 
 /// A component for the final register memory state
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FinalReg {
     _private: (),
 }
@@ -61,17 +62,9 @@ pub(crate) struct FinalRegEval {
     lookup_elements: RegisterCheckLookupElements,
 }
 
-impl Default for FinalRegEval {
-    fn default() -> Self {
-        Self {
-            lookup_elements: RegisterCheckLookupElements::dummy(),
-        }
-    }
-}
-
 impl FinalRegEval {
     // There are 32 registers, so 2^5 = 32 rows are needed.
-    const LOG_SIZE: u32 = 5;
+    pub(crate) const LOG_SIZE: u32 = 5;
     const TUPLE_SIZE: usize = 1 + 2 * WORD_SIZE;
 }
 
@@ -116,19 +109,24 @@ impl FrameworkEval for FinalRegEval {
             &tuple,
         ));
 
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
 
         eval
     }
 }
 
 impl FrameworkEvalExt for FinalRegEval {
-    const LOG_SIZE: u32 = Self::LOG_SIZE;
-
-    fn new(lookup_elements: &AllLookupElements) -> Self {
+    fn new(log_size: u32, lookup_elements: &AllLookupElements) -> Self {
+        assert_eq!(log_size, Self::LOG_SIZE);
         let register_check_lookup_elements: &RegisterCheckLookupElements = lookup_elements.as_ref();
         Self {
             lookup_elements: register_check_lookup_elements.clone(),
+        }
+    }
+    fn dummy(log_size: u32) -> Self {
+        assert_eq!(log_size, Self::LOG_SIZE);
+        Self {
+            lookup_elements: RegisterCheckLookupElements::dummy(),
         }
     }
 }
@@ -136,7 +134,14 @@ impl FrameworkEvalExt for FinalRegEval {
 impl BuiltInExtension for FinalReg {
     type Eval = FinalRegEval;
 
+    fn compute_log_size(&self, _side_note: &SideNote) -> u32 {
+        FinalRegEval::LOG_SIZE
+    }
+
     fn generate_preprocessed_trace(
+        &self,
+        _log_size: u32,
+        _program_trace_ref: ProgramTraceRef,
     ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
         let base_cols = Self::preprocessed_base_columns();
         let domain = CanonicCoset::new(FinalRegEval::LOG_SIZE).circle_domain();
@@ -146,26 +151,33 @@ impl BuiltInExtension for FinalReg {
             .collect()
     }
 
-    fn preprocessed_trace_sizes() -> Vec<u32> {
-        vec![FinalRegEval::LOG_SIZE]
-    }
-
     /// The first four columns represent the final values, the following four columns represent the final timestamps.
     ///
     /// The ordering of rows corresponds to the register index in the preprocessed trace.
-    fn generate_original_trace(
-        side_note: &SideNote,
-    ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
-        let base_cols = Self::base_columns(side_note);
-        let domain = CanonicCoset::new(FinalRegEval::LOG_SIZE).circle_domain();
-        base_cols
-            .into_iter()
-            .map(|col| CircleEvaluation::new(domain, col))
-            .collect()
+    fn generate_component_trace(
+        &self,
+        log_size: u32,
+        _: ProgramTraceRef,
+        side_note: &mut SideNote,
+    ) -> ComponentTrace {
+        let preprocessed_trace = Self::preprocessed_base_columns();
+        let original_trace = Self::base_columns(side_note);
+
+        ComponentTrace {
+            log_size,
+            preprocessed_trace,
+            original_trace,
+        }
+    }
+
+    fn preprocessed_trace_sizes(_log_size: u32) -> Vec<u32> {
+        vec![FinalRegEval::LOG_SIZE]
     }
 
     fn generate_interaction_trace(
-        side_note: &SideNote,
+        &self,
+        component_trace: ComponentTrace,
+        _side_note: &SideNote,
         lookup_elements: &AllLookupElements,
     ) -> (
         ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
@@ -174,37 +186,35 @@ impl BuiltInExtension for FinalReg {
         let lookup_element: &RegisterCheckLookupElements = lookup_elements.as_ref();
 
         let mut logup_trace_gen = LogupTraceGenerator::new(FinalRegEval::LOG_SIZE);
-        let row_idx = &Self::preprocessed_base_columns()[0];
-        let base_cols = Self::base_columns(side_note);
+        let row_idx = &component_trace.preprocessed_trace[0];
+        let base_cols = &component_trace.original_trace;
 
-        // Adding the initial register memory state
+        // Adding the initial register memory state and subtracting the final register memory state
         let mut logup_col_gen = logup_trace_gen.new_col();
         for vec_row in 0..(1 << (FinalRegEval::LOG_SIZE - LOG_N_LANES)) {
             let row_idx = row_idx.data[vec_row];
             let mut tuple: [PackedM31; FinalRegEval::TUPLE_SIZE] =
                 [BaseField::zero().into(); FinalRegEval::TUPLE_SIZE]; // reg_idx, cur_timestamp, cur_value
             tuple[0] = row_idx; // Use row_idx as register index
-            let denom = lookup_element.combine(tuple.as_slice());
-            let numerator = PackedBaseField::broadcast(BaseField::one());
-            logup_col_gen.write_frac(vec_row, numerator.into(), denom);
-        }
-        logup_col_gen.finalize_col();
+            let denom_a: PackedSecureField = lookup_element.combine(tuple.as_slice());
+            let numerator_a: PackedSecureField =
+                PackedBaseField::broadcast(BaseField::one()).into();
 
-        // Subtracting the final register memory state
-        let mut logup_col_gen = logup_trace_gen.new_col();
-        for vec_row in 0..(1 << (FinalRegEval::LOG_SIZE - LOG_N_LANES)) {
-            let row_idx = row_idx.data[vec_row];
             let mut tuple = vec![row_idx];
             for col in base_cols.iter() {
                 tuple.push(col.data[vec_row]);
             }
             assert_eq!(tuple.len(), FinalRegEval::TUPLE_SIZE);
-            let denom = lookup_element.combine(tuple.as_slice());
-            let numerator = PackedBaseField::broadcast(-BaseField::one());
-            logup_col_gen.write_frac(vec_row, numerator.into(), denom);
+            let denom_b: PackedSecureField = lookup_element.combine(tuple.as_slice());
+            let numerator_b: PackedSecureField =
+                PackedBaseField::broadcast(-BaseField::one()).into();
+            logup_col_gen.write_frac(
+                vec_row,
+                numerator_a * denom_b + numerator_b * denom_a,
+                denom_a * denom_b,
+            );
         }
         logup_col_gen.finalize_col();
-
         logup_trace_gen.finalize_last()
     }
 }

@@ -11,6 +11,7 @@ use stwo_prover::core::{
 use crate::{
     column::Column::{self, OpA, OpB, Reg1Address, Reg2Address, Reg3Address},
     components::AllLookupElements,
+    extensions::ExtensionsConfig,
     trace::{
         eval::TraceEval, program_trace::ProgramTraces, sidenote::SideNote, FinalizedTraces,
         PreprocessedTraces, ProgramStep, TracesBuilder,
@@ -32,6 +33,7 @@ impl MachineChip for Range32Chip {
     fn draw_lookup_elements(
         all_elements: &mut AllLookupElements,
         channel: &mut impl stwo_prover::core::channel::Channel,
+        _config: &ExtensionsConfig,
     ) {
         all_elements.insert(Range32LookupElements::draw(channel));
     }
@@ -42,6 +44,7 @@ impl MachineChip for Range32Chip {
         row_idx: usize,
         _step: &Option<ProgramStep>,
         side_note: &mut SideNote,
+        _config: &ExtensionsConfig,
     ) {
         for col in CHECKED.into_iter() {
             let [val] = traces.column(row_idx, col);
@@ -81,6 +84,7 @@ impl MachineChip for Range32Chip {
         eval: &mut E,
         trace_eval: &TraceEval<E>,
         lookup_elements: &AllLookupElements,
+        _config: &ExtensionsConfig,
     ) {
         let lookup_elements: &Range32LookupElements = lookup_elements.as_ref();
 
@@ -112,10 +116,10 @@ mod test {
     use crate::extensions::ExtensionComponent;
     use crate::test_utils::{assert_chip, commit_traces, test_params, CommittedTraces};
     use crate::trace::preprocessed::PreprocessedBuilder;
-    use crate::trace::program_trace::ProgramTracesBuilder;
+    use crate::trace::program_trace::{ProgramTraceRef, ProgramTracesBuilder};
     use crate::traits::MachineChip;
 
-    use nexus_vm::emulator::{Emulator, HarvardEmulator};
+    use nexus_vm::emulator::{Emulator, HarvardEmulator, ProgramInfo};
     use num_traits::Zero;
 
     #[test]
@@ -137,6 +141,7 @@ mod test {
                 row_idx,
                 &Some(ProgramStep::default()),
                 &mut side_note,
+                &ExtensionsConfig::default(),
             );
         }
         assert_chip::<Range32Chip>(traces, None);
@@ -147,7 +152,14 @@ mod test {
         const LOG_SIZE: u32 = PreprocessedBuilder::MIN_LOG_SIZE;
         let (config, twiddles) = test_params(LOG_SIZE);
         let mut traces = TracesBuilder::new(LOG_SIZE);
-        let program_traces = ProgramTracesBuilder::dummy(LOG_SIZE);
+        let program_info = ProgramInfo::dummy();
+        let program_trace_ref = ProgramTraceRef {
+            program_memory: &program_info,
+            init_memory: Default::default(),
+            exit_code: Default::default(),
+            public_output: Default::default(),
+        };
+        let program_traces = ProgramTracesBuilder::new(LOG_SIZE, program_trace_ref);
         let mut side_note = SideNote::new(&program_traces, &HarvardEmulator::default().finalize());
         // Write in-range values to ValueA columns.
         for row_idx in 0..traces.num_rows() {
@@ -159,6 +171,7 @@ mod test {
                 row_idx,
                 &Some(ProgramStep::default()),
                 &mut side_note,
+                &ExtensionsConfig::default(),
             );
         }
         // modify looked up value
@@ -172,7 +185,10 @@ mod test {
 
         // verify that logup sums don't match
         let ext = ExtensionComponent::multiplicity32();
-        let (_, claimed_sum_2) = ext.generate_interaction_trace(&side_note, &lookup_elements);
+        let component_trace =
+            ext.generate_component_trace(32u32.trailing_zeros(), program_trace_ref, &mut side_note);
+        let (_, claimed_sum_2) =
+            ext.generate_interaction_trace(component_trace, &side_note, &lookup_elements);
         assert_ne!(claimed_sum + claimed_sum_2, SecureField::zero());
     }
 }

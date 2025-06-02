@@ -12,6 +12,7 @@ use stwo_prover::core::{
 use crate::{
     column::Column::{self, OpA1_4, OpB0_3, OpB1_4, OpC0_3, OpC12_15, OpC16_19, OpC1_4, OpC4_7},
     components::AllLookupElements,
+    extensions::ExtensionsConfig,
     trace::{
         eval::TraceEval, program_trace::ProgramTraces, sidenote::SideNote, FinalizedTraces,
         PreprocessedTraces, ProgramStep, TracesBuilder,
@@ -42,6 +43,7 @@ impl MachineChip for Range16Chip {
     fn draw_lookup_elements(
         all_elements: &mut AllLookupElements,
         channel: &mut impl stwo_prover::core::channel::Channel,
+        _config: &ExtensionsConfig,
     ) {
         all_elements.insert(Range16LookupElements::draw(channel));
     }
@@ -52,7 +54,11 @@ impl MachineChip for Range16Chip {
         row_idx: usize,
         step: &Option<ProgramStep>,
         side_note: &mut SideNote,
+        _config: &ExtensionsConfig,
     ) {
+        if !step.as_ref().is_some_and(ProgramStep::is_builtin) {
+            return;
+        }
         fill_main_for_type::<IsTypeR>(
             traces,
             row_idx,
@@ -171,6 +177,7 @@ impl MachineChip for Range16Chip {
         eval: &mut E,
         trace_eval: &TraceEval<E>,
         lookup_elements: &AllLookupElements,
+        _config: &ExtensionsConfig,
     ) {
         let lookup_elements: &Range16LookupElements = lookup_elements.as_ref();
 
@@ -295,10 +302,10 @@ mod test {
     use crate::extensions::ExtensionComponent;
     use crate::test_utils::{assert_chip, commit_traces, test_params, CommittedTraces};
 
-    use crate::trace::program_trace::ProgramTracesBuilder;
+    use crate::trace::program_trace::{ProgramTraceRef, ProgramTracesBuilder};
     use crate::traits::MachineChip;
 
-    use nexus_vm::emulator::{Emulator, HarvardEmulator};
+    use nexus_vm::emulator::{Emulator, HarvardEmulator, ProgramInfo};
 
     use stwo_prover::core::fields::qm31::SecureField;
 
@@ -362,6 +369,7 @@ mod test {
                 row_idx,
                 &Some(program_step.clone()),
                 &mut side_note,
+                &ExtensionsConfig::default(),
             );
         }
         assert_chip::<Range16Chip>(traces, None);
@@ -372,7 +380,14 @@ mod test {
         const LOG_SIZE: u32 = PreprocessedTraces::MIN_LOG_SIZE;
         let (config, twiddles) = test_params(LOG_SIZE);
         let mut traces = TracesBuilder::new(LOG_SIZE);
-        let program_traces = ProgramTracesBuilder::dummy(LOG_SIZE);
+        let program_info = ProgramInfo::dummy();
+        let program_trace_ref = ProgramTraceRef {
+            program_memory: &program_info,
+            init_memory: Default::default(),
+            exit_code: Default::default(),
+            public_output: Default::default(),
+        };
+        let program_traces = ProgramTracesBuilder::new(LOG_SIZE, program_trace_ref);
         let mut side_note = SideNote::new(&program_traces, &HarvardEmulator::default().finalize());
         let mut program_step = ProgramStep::default();
         program_step.step.instruction.ins_type = InstructionType::RType;
@@ -388,6 +403,7 @@ mod test {
                 row_idx,
                 &Some(program_step.clone()),
                 &mut side_note,
+                &ExtensionsConfig::default(),
             );
         }
         // modify looked up value
@@ -401,7 +417,10 @@ mod test {
 
         // verify that logup sums don't match
         let ext = ExtensionComponent::multiplicity16();
-        let (_, claimed_sum_2) = ext.generate_interaction_trace(&side_note, &lookup_elements);
+        let component_trace =
+            ext.generate_component_trace(16u32.trailing_zeros(), program_trace_ref, &mut side_note);
+        let (_, claimed_sum_2) =
+            ext.generate_interaction_trace(component_trace, &side_note, &lookup_elements);
         assert_ne!(claimed_sum + claimed_sum_2, SecureField::zero());
     }
 }

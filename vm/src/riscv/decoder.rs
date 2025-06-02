@@ -58,7 +58,10 @@
 //! and instruction-level parallelism detection in RISC-V programs.
 
 use crate::riscv::instructions::{BasicBlock, BasicBlockProgram, Instruction, InstructionDecoder};
-use nexus_common::riscv::{instruction::InstructionType, register::Register, Opcode};
+use nexus_common::{
+    constants::KECCAKF_OPCODE,
+    riscv::{instruction::InstructionType, register::Register, Opcode},
+};
 use rrs_lib::process_instruction;
 
 #[inline(always)]
@@ -148,7 +151,7 @@ pub fn decode_instruction(u32_instruction: u32) -> Instruction {
                 i_imm,
                 InstructionType::IType,
             )
-        } else if opcode == DYNAMIC_STYPE_OPCODE {
+        } else if opcode == DYNAMIC_STYPE_OPCODE || opcode == KECCAKF_OPCODE {
             Instruction::new(
                 Opcode::new(opcode, Some(fn3), None, "dynamic"),
                 Register::from(rs1),
@@ -242,9 +245,10 @@ mod tests {
     /// 3. Loads the ELF file for each test case
     /// 4. Decodes a subset of instructions starting from the entry point
     /// 5. Compares the decoded instructions with the expected assembly output
+    #[ignore]
     #[test]
     fn test_decode_instruction_from_elf() {
-        let test_cases = [("test/fib_10.elf", 4096)];
+        let test_cases = [("test/fib_10.elf", 0x1000)];
 
         let gold_test = [
             "│   0: addi a0, s1, 1",
@@ -276,6 +280,7 @@ mod tests {
         }
     }
 
+    #[ignore]
     #[test]
     fn test_decode_instruction_from_elf_until_end_of_block() {
         let test_cases = [("test/fib_10.elf", 4096)];

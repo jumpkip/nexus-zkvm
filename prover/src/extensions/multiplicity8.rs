@@ -18,14 +18,15 @@ use stwo_prover::{
 };
 
 use crate::{
-    chips::range_check::range8::Range8LookupElements, components::AllLookupElements,
-    trace::sidenote::SideNote,
+    chips::range_check::range8::Range8LookupElements,
+    components::AllLookupElements,
+    trace::{program_trace::ProgramTraceRef, sidenote::SideNote},
 };
 
-use super::{BuiltInExtension, FrameworkEvalExt};
+use super::{BuiltInExtension, ComponentTrace, FrameworkEvalExt};
 
 /// A component for range check multiplicity
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Multiplicity8 {
     _private: (),
 }
@@ -42,14 +43,6 @@ pub(crate) struct MultiplicityEval8 {
 
 impl MultiplicityEval8 {
     const LOG_SIZE: u32 = LOG_N_LANES; // SIMD needs 16 rows to operate
-}
-
-impl Default for MultiplicityEval8 {
-    fn default() -> Self {
-        Self {
-            lookup_elements: Range8LookupElements::dummy(),
-        }
-    }
 }
 
 /// A column with {0, ..., 7} and eight zero's
@@ -95,12 +88,17 @@ impl FrameworkEval for MultiplicityEval8 {
 }
 
 impl FrameworkEvalExt for MultiplicityEval8 {
-    const LOG_SIZE: u32 = Self::LOG_SIZE;
-
-    fn new(lookup_elements: &AllLookupElements) -> Self {
+    fn new(log_size: u32, lookup_elements: &AllLookupElements) -> Self {
+        assert_eq!(log_size, Self::LOG_SIZE);
         let lookup: &Range8LookupElements = lookup_elements.as_ref();
         Self {
             lookup_elements: lookup.clone(),
+        }
+    }
+    fn dummy(log_size: u32) -> Self {
+        assert_eq!(log_size, Self::LOG_SIZE);
+        Self {
+            lookup_elements: Range8LookupElements::dummy(),
         }
     }
 }
@@ -108,7 +106,33 @@ impl FrameworkEvalExt for MultiplicityEval8 {
 impl BuiltInExtension for Multiplicity8 {
     type Eval = MultiplicityEval8;
 
+    fn compute_log_size(&self, _side_note: &SideNote) -> u32 {
+        Self::Eval::LOG_SIZE
+    }
+
+    /// Contains only one column, representing the multiplicity
+    ///
+    /// The ordering of rows is the same as the ordering of the preprocessed value column.
+    fn generate_component_trace(
+        &self,
+        log_size: u32,
+        _: ProgramTraceRef,
+        side_note: &mut SideNote,
+    ) -> ComponentTrace {
+        let preprocessed_trace = Self::preprocessed_base_columns();
+        let original_trace = Self::base_columns(side_note);
+
+        ComponentTrace {
+            log_size,
+            preprocessed_trace,
+            original_trace,
+        }
+    }
+
     fn generate_preprocessed_trace(
+        &self,
+        _log_size: u32,
+        _program_trace_ref: ProgramTraceRef,
     ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
         let base_cols = Self::preprocessed_base_columns();
         let domain = CanonicCoset::new(Self::Eval::LOG_SIZE).circle_domain();
@@ -118,34 +142,22 @@ impl BuiltInExtension for Multiplicity8 {
             .collect()
     }
 
-    fn preprocessed_trace_sizes() -> Vec<u32> {
+    fn preprocessed_trace_sizes(_log_size: u32) -> Vec<u32> {
         vec![Self::Eval::LOG_SIZE]
     }
 
-    /// Contains only one column, representing the multiplicity
-    ///
-    /// The ordering of rows is the same as the ordering of the preprocessed value column.
-    fn generate_original_trace(
-        side_note: &SideNote,
-    ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
-        let base_cols = Self::base_columns(side_note);
-        let domain = CanonicCoset::new(Self::Eval::LOG_SIZE).circle_domain();
-        base_cols
-            .into_iter()
-            .map(|col| CircleEvaluation::new(domain, col))
-            .collect()
-    }
-
     fn generate_interaction_trace(
-        side_note: &SideNote,
+        &self,
+        component_trace: ComponentTrace,
+        _side_note: &SideNote,
         lookup_elements: &AllLookupElements,
     ) -> (
         ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
         SecureField,
     ) {
         let lookup_element: &Range8LookupElements = lookup_elements.as_ref();
-        let values = &Self::preprocessed_base_columns()[0];
-        let base_cols = Self::base_columns(side_note);
+        let values = &component_trace.preprocessed_trace[0];
+        let base_cols = &component_trace.original_trace;
         let mut logup_trace_gen = LogupTraceGenerator::new(Self::Eval::LOG_SIZE);
 
         // Subtract looked up values with the multiplicity
@@ -175,7 +187,7 @@ impl Multiplicity8 {
         let range_values = BaseColumn::from_iter(
             (0..8)
                 .map(BaseField::from)
-                .chain(std::iter::repeat(BaseField::zero()).take(Self::num_padding())),
+                .chain(std::iter::repeat_n(BaseField::zero(), Self::num_padding())),
         );
         vec![range_values]
     }
@@ -186,7 +198,7 @@ impl Multiplicity8 {
                 .multiplicity
                 .into_iter()
                 .map(BaseField::from)
-                .chain(std::iter::repeat(BaseField::zero()).take(Self::num_padding())),
+                .chain(std::iter::repeat_n(BaseField::zero(), Self::num_padding())),
         );
         vec![multiplicities]
     }

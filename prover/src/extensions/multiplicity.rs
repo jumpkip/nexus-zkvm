@@ -25,10 +25,13 @@ use crate::{
         range256::Range256LookupElements, range32::Range32LookupElements,
     },
     components::{AllLookupElements, RegisteredLookupBound},
-    trace::sidenote::{RangeCheckSideNote, RangeCheckSideNoteGetter, SideNote},
+    trace::{
+        program_trace::ProgramTraceRef,
+        sidenote::{RangeCheckSideNote, RangeCheckSideNoteGetter, SideNote},
+    },
 };
 
-use super::{BuiltInExtension, FrameworkEvalExt};
+use super::{BuiltInExtension, ComponentTrace, FrameworkEvalExt};
 
 /// A component for range check multiplicity
 ///
@@ -37,6 +40,20 @@ use super::{BuiltInExtension, FrameworkEvalExt};
 #[derive(Debug, Clone)]
 pub struct Multiplicity<const LEN: usize, L> {
     _phantom: std::marker::PhantomData<L>,
+}
+
+// auto-derive enforces bounds on generic parameters
+
+impl<const LEN: usize, L> PartialEq for Multiplicity<LEN, L> {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl<const LEN: usize, L> Eq for Multiplicity<LEN, L> {}
+
+impl<const LEN: usize, L> std::hash::Hash for Multiplicity<LEN, L> {
+    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
 }
 
 impl<const LEN: usize, L> Multiplicity<LEN, L> {
@@ -108,12 +125,17 @@ impl<const LEN: usize, L: RegisteredLookupBound> FrameworkEval for MultiplicityE
 }
 
 impl<const LEN: usize, L: RegisteredLookupBound> FrameworkEvalExt for MultiplicityEval<LEN, L> {
-    const LOG_SIZE: u32 = Self::LOG_SIZE;
-
-    fn new(lookup_elements: &AllLookupElements) -> Self {
+    fn new(log_size: u32, lookup_elements: &AllLookupElements) -> Self {
+        assert_eq!(log_size, Self::LOG_SIZE,);
         let lookup: &L = lookup_elements.as_ref();
         Self {
             lookup_elements: lookup.clone(),
+        }
+    }
+    fn dummy(log_size: u32) -> Self {
+        assert_eq!(log_size, Self::LOG_SIZE);
+        Self {
+            lookup_elements: L::dummy(),
         }
     }
 }
@@ -127,7 +149,33 @@ where
 {
     type Eval = MultiplicityEval<LEN, L>;
 
+    fn compute_log_size(&self, _side_note: &SideNote) -> u32 {
+        MultiplicityEval::<LEN, L>::LOG_SIZE
+    }
+
+    /// Contains only one column, representing the multiplicity
+    ///
+    /// The ordering of rows is the same as the ordering of the preprocessed value column.
+    fn generate_component_trace(
+        &self,
+        log_size: u32,
+        _: ProgramTraceRef,
+        side_note: &mut SideNote,
+    ) -> ComponentTrace {
+        let preprocessed_trace = Self::preprocessed_base_columns();
+        let original_trace = Self::base_columns(side_note);
+
+        ComponentTrace {
+            log_size,
+            preprocessed_trace,
+            original_trace,
+        }
+    }
+
     fn generate_preprocessed_trace(
+        &self,
+        _log_size: u32,
+        _program_trace_ref: ProgramTraceRef,
     ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
         let base_cols = Self::preprocessed_base_columns();
         let domain = CanonicCoset::new(Self::Eval::LOG_SIZE).circle_domain();
@@ -137,34 +185,22 @@ where
             .collect()
     }
 
-    fn preprocessed_trace_sizes() -> Vec<u32> {
+    fn preprocessed_trace_sizes(_log_size: u32) -> Vec<u32> {
         vec![Self::Eval::LOG_SIZE]
     }
 
-    /// Contains only one column, representing the multiplicity
-    ///
-    /// The ordering of rows is the same as the ordering of the preprocessed value column.
-    fn generate_original_trace(
-        side_note: &SideNote,
-    ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
-        let base_cols = Self::base_columns(side_note);
-        let domain = CanonicCoset::new(Self::Eval::LOG_SIZE).circle_domain();
-        base_cols
-            .into_iter()
-            .map(|col| CircleEvaluation::new(domain, col))
-            .collect()
-    }
-
     fn generate_interaction_trace(
-        side_note: &SideNote,
+        &self,
+        component_trace: ComponentTrace,
+        _side_note: &SideNote,
         lookup_elements: &AllLookupElements,
     ) -> (
         ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
         SecureField,
     ) {
         let lookup_element: &L = lookup_elements.as_ref();
-        let values = &Self::preprocessed_base_columns()[0];
-        let base_cols = Self::base_columns(side_note);
+        let values = &component_trace.preprocessed_trace[0];
+        let base_cols = &component_trace.original_trace;
         let mut logup_trace_gen = LogupTraceGenerator::new(Self::Eval::LOG_SIZE);
 
         // Subtract looked up values with the multiplicity

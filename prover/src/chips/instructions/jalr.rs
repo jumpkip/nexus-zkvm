@@ -5,6 +5,7 @@ use nexus_vm::{riscv::BuiltinOpcode, WORD_SIZE};
 use crate::{
     column::Column::{self, *},
     components::AllLookupElements,
+    extensions::ExtensionsConfig,
     trace::{
         eval::{trace_eval, TraceEval},
         sidenote::SideNote,
@@ -74,6 +75,7 @@ impl MachineChip for JalrChip {
         row_idx: usize,
         vm_step: &Option<ProgramStep>,
         _side_note: &mut SideNote,
+        _config: &ExtensionsConfig,
     ) {
         let vm_step = match vm_step {
             Some(vm_step) => vm_step,
@@ -115,6 +117,7 @@ impl MachineChip for JalrChip {
         eval: &mut E,
         trace_eval: &TraceEval<E>,
         _lookup_elements: &AllLookupElements,
+        _config: &ExtensionsConfig,
     ) {
         let modulus = E::F::from(256u32.into());
         let value_a = trace_eval!(trace_eval, ValueA);
@@ -224,16 +227,16 @@ mod test {
     const LOG_SIZE: u32 = PreprocessedTraces::MIN_LOG_SIZE;
 
     fn setup_basic_block_ir() -> Vec<BasicBlock> {
-        // Make sure the 12 lowest bit of ELF_TEXT_START are zeros.
-        assert_eq!(ELF_TEXT_START & 0xFFF, 0);
+        // Make sure that ELF_TEXT_START fits into 12 bits
+        assert_eq!(ELF_TEXT_START & 0xFFF, ELF_TEXT_START);
         let basic_block = BasicBlock::new(vec![
             // Initialize registers
             // Set x1 = ELF_TEXT_START + 16 (base address for first JALR)
-            Instruction::new_ir(Opcode::from(BuiltinOpcode::LUI), 1, 0, ELF_TEXT_START >> 12),
-            Instruction::new_ir(Opcode::from(BuiltinOpcode::ADDI), 1, 1, 16),
+            Instruction::new_ir(Opcode::from(BuiltinOpcode::ADDI), 0, 0, 0),
+            Instruction::new_ir(Opcode::from(BuiltinOpcode::ADDI), 1, 1, ELF_TEXT_START + 16),
             // Set x2 = ELF_TEXT_START + 44 (base address for second JALR)
-            Instruction::new_ir(Opcode::from(BuiltinOpcode::LUI), 2, 0, ELF_TEXT_START >> 12),
-            Instruction::new_ir(Opcode::from(BuiltinOpcode::ADDI), 2, 2, 44),
+            Instruction::new_ir(Opcode::from(BuiltinOpcode::LUI), 0, 0, 0),
+            Instruction::new_ir(Opcode::from(BuiltinOpcode::ADDI), 2, 2, ELF_TEXT_START + 44),
             // Case 1: JALR with positive offset
             // JALR x3, x1, 4 (Jump to x1 + 4 and store return address in x3)
             Instruction::new_ir(Opcode::from(BuiltinOpcode::JALR), 3, 1, 12),
@@ -289,7 +292,13 @@ mod test {
 
         // We iterate each block in the trace for each instruction
         for (row_idx, program_step) in program_steps.enumerate() {
-            Chips::fill_main_trace(&mut traces, row_idx, &program_step, &mut side_note);
+            Chips::fill_main_trace(
+                &mut traces,
+                row_idx,
+                &program_step,
+                &mut side_note,
+                &ExtensionsConfig::default(),
+            );
         }
         assert_chip::<Chips>(traces, Some(program_traces.finalize()));
     }

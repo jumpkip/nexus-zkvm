@@ -5,14 +5,15 @@ use num_traits::One;
 use crate::{
     column::Column::{
         self, BorrowFlag, CH1Minus, CH2Minus, CH3Minus, CarryFlag, ImmC, IsAdd, IsAnd, IsAuipc,
-        IsBge, IsBgeu, IsBlt, IsBltu, IsEbreak, IsEcall, IsJal, IsJalr, IsLb, IsLbu, IsLh, IsLhu,
-        IsLui, IsLw, IsOr, IsPadding, IsSb, IsSh, IsSll, IsSlt, IsSltu, IsSra, IsSrl, IsSub, IsSw,
-        IsSysCycleCount, IsSysDebug, IsSysHalt, IsSysHeapReset, IsSysPrivInput, IsSysStackReset,
-        IsXor, LtFlag, OpA0, OpB0, OpB4, OpC0, OpC11, OpC12, OpC20, OpC4, PcCarry, ProgCtrCarry,
-        RamInitFinalFlag, RemAux, SgnA, SgnB, SgnC, ShiftBit1, ShiftBit2, ShiftBit3, ShiftBit4,
+        IsBeq, IsBge, IsBgeu, IsBlt, IsBltu, IsBne, IsEbreak, IsEcall, IsJal, IsJalr, IsLb, IsLbu,
+        IsLh, IsLhu, IsLui, IsLw, IsOr, IsPadding, IsSb, IsSh, IsSll, IsSlt, IsSltu, IsSra, IsSrl,
+        IsSub, IsSw, IsSysCycleCount, IsSysDebug, IsSysHalt, IsSysHeapReset, IsSysPrivInput,
+        IsSysStackReset, IsXor, LtFlag, OpA0, OpB0, OpB4, OpC0, OpC11, OpC12, OpC20, OpC4, PcCarry,
+        ProgCtrCarry, RemAux, SgnA, SgnB, SgnC, ShiftBit1, ShiftBit2, ShiftBit3, ShiftBit4,
         ShiftBit5, ValueAEffectiveFlag,
     },
     components::AllLookupElements,
+    extensions::ExtensionsConfig,
     trace::{eval::TraceEval, sidenote::SideNote, ProgramStep, TracesBuilder},
     traits::MachineChip,
     virtual_column::{self, VirtualColumn},
@@ -23,7 +24,7 @@ use crate::{
 /// RangeBoolChip can be located anywhere in the chip composition.
 pub struct RangeBoolChip;
 
-const CHECKED_SINGLE: [Column; 48] = [
+const CHECKED_SINGLE: [Column; 49] = [
     ValueAEffectiveFlag,
     ImmC,
     IsAdd,
@@ -37,6 +38,8 @@ const CHECKED_SINGLE: [Column; 48] = [
     IsBlt,
     IsBgeu,
     IsBge,
+    IsBne,
+    IsBeq,
     IsJal,
     IsSb,
     IsSh,
@@ -71,7 +74,6 @@ const CHECKED_SINGLE: [Column; 48] = [
     ShiftBit3,
     ShiftBit4,
     ShiftBit5,
-    RamInitFinalFlag,
 ];
 const CHECKED_HALF_WORD: [Column; 7] = [
     CarryFlag,
@@ -95,6 +97,7 @@ impl MachineChip for RangeBoolChip {
         _row_idx: usize,
         _step: &Option<ProgramStep>,
         _side_note: &mut SideNote,
+        _config: &ExtensionsConfig,
     ) {
         // Intentionally empty. Logup isn't used.
     }
@@ -103,6 +106,7 @@ impl MachineChip for RangeBoolChip {
         eval: &mut E,
         trace_eval: &TraceEval<E>,
         _lookup_elements: &AllLookupElements,
+        _config: &ExtensionsConfig,
     ) {
         for col in CHECKED_SINGLE.into_iter() {
             let [col] = trace_eval.column_eval(col);
@@ -192,6 +196,7 @@ mod test {
                 row_idx,
                 &Some(ProgramStep::default()),
                 &mut side_note,
+                &ExtensionsConfig::default(),
             );
         }
         assert_chip::<RangeBoolChip>(traces, None);
@@ -217,6 +222,7 @@ mod test {
                 row_idx,
                 &Some(ProgramStep::default()),
                 &mut side_note,
+                &ExtensionsConfig::default(),
             );
         }
         let CommittedTraces {
@@ -231,7 +237,11 @@ mod test {
 
         let component = Component::new(
             &mut TraceLocationAllocator::default(),
-            MachineEval::<RangeBoolChip>::new(LOG_SIZE, lookup_elements),
+            MachineEval::<RangeBoolChip>::new(
+                LOG_SIZE,
+                lookup_elements,
+                ExtensionsConfig::default(),
+            ),
             claimed_sum,
         );
 

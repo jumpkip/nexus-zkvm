@@ -53,6 +53,8 @@ pub trait Trace {
     fn get_num_steps(&self) -> usize {
         self.get_blocks_iter().map(|b| b.steps.len()).sum()
     }
+
+    fn as_blocks_slice(&self) -> &[Block];
 }
 
 /// Represents a program trace over uniform blocks.
@@ -83,6 +85,10 @@ impl Trace for UniformTrace {
 
     fn get_num_steps(&self) -> usize {
         self.k * self.blocks.len()
+    }
+
+    fn as_blocks_slice(&self) -> &[Block] {
+        self.blocks.as_slice()
     }
 }
 
@@ -145,6 +151,10 @@ impl Trace for BBTrace {
 
     fn get_start(&self) -> usize {
         self.start
+    }
+
+    fn as_blocks_slice(&self) -> &[Block] {
+        self.blocks.as_slice()
     }
 }
 
@@ -490,55 +500,45 @@ pub fn bb_trace_direct(basic_blocks: &Vec<BasicBlock>) -> Result<(View, BBTrace)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{MemAccessSize, MemoryRecord};
-    use crate::riscv::{BuiltinOpcode, Opcode, Register};
+    use crate::{
+        read_testing_elf_from_path,
+        riscv::{BuiltinOpcode, Opcode, Register},
+    };
+    use nexus_common::constants::ELF_TEXT_START;
     use serial_test::serial;
 
     #[test]
     #[serial]
     fn test_k1_trace_nexus_rt_binary() {
-        let elf_file = ElfFile::from_path("test/fib_10.elf").expect("Unable to load ELF file");
+        let elf_file = read_testing_elf_from_path!("/test/fib_10.elf");
         let (_, trace) = k_trace(elf_file, &[], &[], &[], 1).unwrap(); // todo: unit test over a program with complex i/o to enable checking view
 
         // check the first block
         let block = trace.block(0).unwrap();
 
         assert_eq!(block.steps.len(), 1);
-        assert_eq!(trace.block(1).unwrap().regs[Register::X3], 12288); // check global pointer is updated
+        assert_eq!(trace.block(1).unwrap().regs[Register::X3], 0x2088); // check global pointer is updated
 
         let step = block.steps[0].clone();
 
         assert_eq!(step.timestamp, 1);
-        assert_eq!(step.pc, 4096);
-        assert_eq!(step.next_pc, 4100);
+        assert_eq!(step.pc, ELF_TEXT_START);
+        assert_eq!(step.next_pc, ELF_TEXT_START + 4);
         assert_eq!(step.raw_instruction, 0x00002197);
         assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::AUIPC));
-        assert_eq!(step.result, Some(12288));
+        assert_eq!(step.result, Some(0x2088));
         assert!(step.memory_records.is_empty());
 
-        // check a memory operation
-        let block = trace.block(12).unwrap();
+        let block = trace.block(2).unwrap();
+        let step = block.steps[0].clone();
 
-        assert_eq!(block.steps.len(), 1);
-        assert_eq!(trace.block(13).unwrap().regs, block.regs); // sw leaves registers unchanged
-
-        let mut step = block.steps[0].clone();
-
-        assert_eq!(step.timestamp, 13);
-        assert_eq!(step.pc, 4144);
-        assert_eq!(step.next_pc, 4148);
-        assert_eq!(step.raw_instruction, 0x00112623);
-        assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::SW));
-        assert_eq!(step.result, None);
-        assert_eq!(step.memory_records.len(), 1);
-
-        assert!(step
-            .memory_records
-            .take(&MemoryRecord::StoreRecord(
-                (MemAccessSize::Word, 0x3C1C, 4128, 0),
-                13,
-            ))
-            .is_some());
+        assert_eq!(step.timestamp, 3);
+        assert_eq!(step.pc, 0x90);
+        assert_eq!(step.next_pc, 0x94);
+        assert_eq!(step.raw_instruction, 0x80400117);
+        assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::AUIPC));
+        assert_eq!(step.result, Some(0x80400090));
+        assert_eq!(step.memory_records.len(), 0);
 
         let block = trace.block(trace.blocks.len() - 1).unwrap();
 
@@ -547,8 +547,8 @@ mod tests {
         let step = block.steps[0].clone();
 
         assert_eq!(step.timestamp, trace.blocks.len() as u32);
-        assert_eq!(step.pc, 4176);
-        assert_eq!(step.next_pc, 4176);
+        assert_eq!(step.pc, 0xCC);
+        assert_eq!(step.next_pc, 0xCC);
         assert_eq!(step.raw_instruction, 0x00000073);
         assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::ECALL));
         assert_eq!(step.result, Some(0));
@@ -558,23 +558,23 @@ mod tests {
     #[test]
     #[serial]
     fn test_k8_trace_nexus_rt_binary() {
-        let elf_file = ElfFile::from_path("test/fib_10.elf").expect("Unable to load ELF file");
+        let elf_file = read_testing_elf_from_path!("/test/fib_10.elf");
         let (_, trace) = k_trace(elf_file, &[], &[], &[], 8).unwrap(); // todo: unit test over a program with complex i/o to enable checking view
 
         // check the first block
         let block = trace.block(0).unwrap();
 
         assert_eq!(block.steps.len(), 8);
-        assert_eq!(trace.block(1).unwrap().regs[Register::X3], 12024); // check global pointer is updated (also after `addi gp, gp, -264` at timestamp 2)
+        assert_eq!(trace.block(1).unwrap().regs[Register::X3], 0x1F30); // check global pointer is updated (also after `addi gp, gp, -264` at timestamp 2)
 
         let step = block.steps[0].clone();
 
         assert_eq!(step.timestamp, 1);
-        assert_eq!(step.pc, 4096);
-        assert_eq!(step.next_pc, 4100);
+        assert_eq!(step.pc, 0x88);
+        assert_eq!(step.next_pc, 0x8C);
         assert_eq!(step.raw_instruction, 0x00002197);
         assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::AUIPC));
-        assert_eq!(step.result, Some(12288));
+        assert_eq!(step.result, Some(0x2088));
         assert!(step.memory_records.is_empty());
 
         // check a memory operation
@@ -582,23 +582,15 @@ mod tests {
 
         assert_eq!(block.steps.len(), 8);
 
-        let mut step = block.steps[4].clone();
+        let step = block.steps[4].clone();
 
         assert_eq!(step.timestamp, 13);
-        assert_eq!(step.pc, 4144);
-        assert_eq!(step.next_pc, 4148);
-        assert_eq!(step.raw_instruction, 0x00112623);
-        assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::SW));
-        assert_eq!(step.result, None);
-        assert_eq!(step.memory_records.len(), 1);
-
-        assert!(step
-            .memory_records
-            .take(&MemoryRecord::StoreRecord(
-                (MemAccessSize::Word, 0x3C1C, 4128, 0),
-                13,
-            ))
-            .is_some());
+        assert_eq!(step.pc, 0x25C);
+        assert_eq!(step.next_pc, 0x260);
+        assert_eq!(step.raw_instruction, 0xFA010113);
+        assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::ADDI));
+        assert_eq!(step.result, Some(0x1A50));
+        assert_eq!(step.memory_records.len(), 0);
 
         let block = trace.block(trace.blocks.len() - 1).unwrap();
 
@@ -610,8 +602,8 @@ mod tests {
             step.timestamp,
             (8 * (trace.blocks.len() as u32 - 1) + block.steps.len() as u32)
         );
-        assert_eq!(step.pc, 4176);
-        assert_eq!(step.next_pc, 4176);
+        assert_eq!(step.pc, 0xCC);
+        assert_eq!(step.next_pc, 0xCC);
         assert_eq!(step.raw_instruction, 0x00000073);
         assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::ECALL));
         assert_eq!(step.result, Some(0));
@@ -621,46 +613,38 @@ mod tests {
     #[test]
     #[serial]
     fn test_bb_trace_nexus_rt_binary() {
-        let elf_file = ElfFile::from_path("test/fib_10.elf").expect("Unable to load ELF file");
+        let elf_file = read_testing_elf_from_path!("/test/fib_10.elf");
         let (_, trace) = bb_trace(elf_file, &[], &[], &[]).unwrap(); // todo: unit test over a program with complex i/o to enable checking view
 
         // check the first block
         let block = trace.block(0).unwrap();
 
-        assert_eq!(trace.block(1).unwrap().regs[Register::X3], 12024); // check global pointer is updated (also after `addi gp, gp, -264` at timestamp 2)
+        assert_eq!(trace.block(1).unwrap().regs[Register::X3], 0x1F30); // check global pointer is updated (also after `addi gp, gp, -264` at timestamp 2)
 
         let step = block.steps[0].clone();
 
         assert_eq!(step.timestamp, 1);
-        assert_eq!(step.pc, 4096);
-        assert_eq!(step.next_pc, 4100);
+        assert_eq!(step.pc, ELF_TEXT_START);
+        assert_eq!(step.next_pc, ELF_TEXT_START + 4);
         assert_eq!(step.raw_instruction, 0x00002197);
         assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::AUIPC));
-        assert_eq!(step.result, Some(12288));
+        assert_eq!(step.result, Some(8328));
         assert!(step.memory_records.is_empty());
 
         // check a memory operation
         let block = trace.block(4).unwrap();
 
-        let mut step = block.steps[1].clone();
+        let step = block.steps[1].clone();
 
-        assert_eq!(step.timestamp, 13);
-        assert_eq!(step.pc, 4144);
-        assert_eq!(step.next_pc, 4148);
-        assert_eq!(step.raw_instruction, 0x00112623);
-        assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::SW));
-        assert_eq!(step.result, None);
-        assert_eq!(step.memory_records.len(), 1);
+        assert_eq!(step.timestamp, 75);
+        assert_eq!(step.pc, 4756);
+        assert_eq!(step.next_pc, 4760);
+        assert_eq!(step.raw_instruction, 0x6050A63);
+        assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::BEQ));
+        assert_eq!(step.result, Some(4760));
+        assert_eq!(step.memory_records.len(), 0);
 
-        println!("{:?}", step.memory_records);
-
-        assert!(step
-            .memory_records
-            .take(&MemoryRecord::StoreRecord(
-                (MemAccessSize::Word, 0x3C1C, 4128, 0),
-                13,
-            ))
-            .is_some());
+        assert!(step.memory_records.is_empty());
 
         let block = trace.block(trace.blocks.len() - 1).unwrap();
 
@@ -668,8 +652,8 @@ mod tests {
 
         let step = block.steps.last().unwrap().clone();
 
-        assert_eq!(step.pc, 4176);
-        assert_eq!(step.next_pc, 4176);
+        assert_eq!(step.pc, 0xCC);
+        assert_eq!(step.next_pc, 0xCC);
         assert_eq!(step.raw_instruction, 0x00000073);
         assert_eq!(step.instruction.opcode, Opcode::from(BuiltinOpcode::ECALL));
         assert_eq!(step.result, Some(0));

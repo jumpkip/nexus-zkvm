@@ -14,6 +14,7 @@
 //! Some components must always be present, for example [`final_reg::FinalReg`]. They should only be accessible within
 //! the crate to avoid misuse.
 
+use ram_init_final::RamInitFinal;
 use stwo_prover::{
     constraint_framework::{
         FrameworkComponent, FrameworkEval, InfoEvaluator, TraceLocationAllocator,
@@ -28,37 +29,61 @@ use stwo_prover::{
     },
 };
 
-use crate::{components::AllLookupElements, trace::sidenote::SideNote};
+use crate::{
+    components::AllLookupElements,
+    trace::{program_trace::ProgramTraceRef, sidenote::SideNote},
+};
 
-mod bit_op;
-mod final_reg;
+pub(crate) mod bit_op;
+pub(crate) mod final_reg;
+
+mod multiplicity;
+mod multiplicity8;
+mod ram_init_final;
+mod trace;
+
+mod config;
+
+#[doc(hidden)]
+pub use config::ExtensionsConfig;
+
+pub(crate) mod keccak;
+
+pub(crate) use trace::ComponentTrace;
 
 use bit_op::BitOpMultiplicity;
 use final_reg::FinalReg;
-mod multiplicity;
 use multiplicity::{Multiplicity128, Multiplicity16, Multiplicity256, Multiplicity32};
-mod multiplicity8;
 use multiplicity8::Multiplicity8;
 
-trait FrameworkEvalExt: FrameworkEval + Default + Sync + 'static {
-    // TODO: make it variable, e.g. derived by the component implementation from
-    // the finalized side note.
-    const LOG_SIZE: u32;
+use keccak::{
+    bit_rotate::BitRotateTable, BitNotAndTable, KeccakRound, PermutationMemoryCheck, XorTable,
+};
 
-    fn new(lookup_elements: &AllLookupElements) -> Self;
+trait FrameworkEvalExt: FrameworkEval + Sync + 'static {
+    fn new(log_size: u32, lookup_elements: &AllLookupElements) -> Self;
+    fn dummy(log_size: u32) -> Self;
 }
 
 trait BuiltInExtension {
     type Eval: FrameworkEvalExt;
 
     fn generate_preprocessed_trace(
+        &self,
+        log_size: u32,
+        program_trace_ref: ProgramTraceRef,
     ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>;
 
-    fn generate_original_trace(
-        side_note: &SideNote,
-    ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>;
+    fn generate_component_trace(
+        &self,
+        log_size: u32,
+        program_trace_ref: ProgramTraceRef,
+        side_note: &mut SideNote,
+    ) -> ComponentTrace;
 
     fn generate_interaction_trace(
+        &self,
+        component_trace: ComponentTrace,
         side_note: &SideNote,
         lookup_elements: &AllLookupElements,
     ) -> (
@@ -70,11 +95,12 @@ trait BuiltInExtension {
         &self,
         tree_span_provider: &mut TraceLocationAllocator,
         lookup_elements: &AllLookupElements,
+        log_size: u32,
         claimed_sum: SecureField,
     ) -> Box<dyn ComponentProver<SimdBackend>> {
         Box::new(FrameworkComponent::new(
             tree_span_provider,
-            Self::Eval::new(lookup_elements),
+            Self::Eval::new(log_size, lookup_elements),
             claimed_sum,
         ))
     }
@@ -83,25 +109,28 @@ trait BuiltInExtension {
         &self,
         tree_span_provider: &mut TraceLocationAllocator,
         lookup_elements: &AllLookupElements,
+        log_size: u32,
         claimed_sum: SecureField,
     ) -> Box<dyn Component> {
         Box::new(FrameworkComponent::new(
             tree_span_provider,
-            Self::Eval::new(lookup_elements),
+            Self::Eval::new(log_size, lookup_elements),
             claimed_sum,
         ))
     }
 
-    fn trace_sizes(&self) -> TreeVec<Vec<u32>> {
-        <Self as BuiltInExtension>::Eval::default()
+    fn compute_log_size(&self, side_note: &SideNote) -> u32;
+
+    fn trace_sizes(&self, log_size: u32) -> TreeVec<Vec<u32>> {
+        <Self as BuiltInExtension>::Eval::dummy(log_size)
             .evaluate(InfoEvaluator::empty())
             .mask_offsets
             .as_cols_ref()
-            .map_cols(|_| Self::Eval::LOG_SIZE)
+            .map_cols(|_| log_size)
     }
 
     /// Returns the log_sizes of each preprocessed columns
-    fn preprocessed_trace_sizes() -> Vec<u32>;
+    fn preprocessed_trace_sizes(log_size: u32) -> Vec<u32>;
 }
 
 extension_dispatch! {
@@ -113,6 +142,12 @@ extension_dispatch! {
         Multiplicity128,
         Multiplicity256,
         BitOpMultiplicity,
+        RamInitFinal,
+        XorTable,
+        BitNotAndTable,
+        BitRotateTable,
+        KeccakRound,
+        PermutationMemoryCheck,
     }
 }
 
@@ -138,6 +173,13 @@ impl ExtensionComponent {
     pub(super) const fn bit_op_multiplicity() -> Self {
         Self::BitOpMultiplicity(BitOpMultiplicity::new())
     }
+    pub(super) const fn ram_init_final() -> Self {
+        Self::RamInitFinal(RamInitFinal::new())
+    }
+
+    pub const fn keccak_extensions() -> &'static [Self] {
+        keccak::keccak_extensions()
+    }
 }
 
 // A macro mimicking enum_dispatch, but with less flexibility and therefore without shared state managing.
@@ -148,7 +190,7 @@ impl ExtensionComponent {
 // Such precompiles can be implemented as a separate `Custom(Box<dyn ...>)` variant.
 macro_rules! extension_dispatch {
     ($vis:vis enum $_enum:ident { $( $name:ident ),* $(,)? }) => {
-        #[derive(Debug, Clone)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
         $vis enum $_enum {
             $($name($name),)*
         }
@@ -166,23 +208,28 @@ macro_rules! extension_dispatch {
 
             pub(crate) fn generate_preprocessed_trace(
                 &self,
+                log_size: u32,
+                program_trace_ref: ProgramTraceRef,
             ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
                 match self {
-                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::generate_preprocessed_trace(), )*
+                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::generate_preprocessed_trace(inner, log_size, program_trace_ref), )*
                 }
             }
 
-            pub(crate) fn generate_original_trace(
+            pub(crate) fn generate_component_trace(
                 &self,
-                side_note: &SideNote,
-            ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
+                log_size: u32,
+                program_trace_ref: ProgramTraceRef,
+                side_note: &mut SideNote,
+            ) -> ComponentTrace {
                 match self {
-                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::generate_original_trace(side_note), )*
+                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::generate_component_trace(inner, log_size, program_trace_ref, side_note), )*
                 }
             }
 
             pub(crate) fn generate_interaction_trace(
                 &self,
+                component_trace: ComponentTrace,
                 side_note: &SideNote,
                 lookup_elements: &AllLookupElements,
             ) -> (
@@ -190,7 +237,7 @@ macro_rules! extension_dispatch {
                 SecureField,
             ) {
                 match self {
-                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::generate_interaction_trace(side_note, lookup_elements), )*
+                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::generate_interaction_trace(inner, component_trace, side_note, lookup_elements), )*
                 }
             }
 
@@ -198,10 +245,11 @@ macro_rules! extension_dispatch {
                 &self,
                 tree_span_provider: &mut TraceLocationAllocator,
                 lookup_elements: &AllLookupElements,
+                log_size: u32,
                 claimed_sum: SecureField,
             ) -> Box<dyn ComponentProver<SimdBackend>> {
                 match self {
-                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::to_component_prover(inner, tree_span_provider, lookup_elements, claimed_sum), )*
+                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::to_component_prover(inner, tree_span_provider, lookup_elements, log_size, claimed_sum), )*
                 }
             }
 
@@ -209,22 +257,29 @@ macro_rules! extension_dispatch {
                 &self,
                 tree_span_provider: &mut TraceLocationAllocator,
                 lookup_elements: &AllLookupElements,
+                log_size: u32,
                 claimed_sum: SecureField,
             ) -> Box<dyn Component> {
                 match self {
-                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::to_component(inner, tree_span_provider, lookup_elements, claimed_sum), )*
+                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::to_component(inner, tree_span_provider, lookup_elements, log_size, claimed_sum), )*
                 }
             }
 
-            pub(crate) fn trace_sizes(&self) -> TreeVec<Vec<u32>> {
+            pub(crate) fn compute_log_size(&self, side_note: &SideNote) -> u32 {
                 match self {
-                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::trace_sizes(inner), )*
+                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::compute_log_size(inner, side_note), )*
                 }
             }
 
-            pub(crate) fn preprocessed_trace_sizes(&self) -> Vec<u32> {
+            pub(crate) fn trace_sizes(&self, log_size: u32) -> TreeVec<Vec<u32>> {
                 match self {
-                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::preprocessed_trace_sizes(), )*
+                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::trace_sizes(inner, log_size), )*
+                }
+            }
+
+            pub(crate) fn preprocessed_trace_sizes(&self, log_size: u32) -> Vec<u32> {
+                match self {
+                    $( $_enum::$name(inner) => <$name as BuiltInExtension>::preprocessed_trace_sizes(log_size), )*
                 }
             }
         }

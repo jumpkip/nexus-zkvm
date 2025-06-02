@@ -1,4 +1,5 @@
 use crate::elf::ElfFile;
+use crate::memory::MemorySegmentImage;
 use crate::riscv::{decode_instruction, BasicBlock};
 
 pub use super::executor::Emulator;
@@ -8,7 +9,6 @@ use super::registry;
 use nexus_common::constants::WORD_SIZE;
 use nexus_common::memory::MemoryRecords;
 use nexus_common::riscv::{opcode::BuiltinOpcode, Opcode};
-use std::collections::BTreeMap;
 
 pub type MemoryTranscript = Vec<MemoryRecords>;
 
@@ -74,14 +74,13 @@ pub fn io_entries_into_vec<T: IOEntry>(base: u32, entries: &[T]) -> Vec<u8> {
     vec
 }
 
-pub fn map_into_io_entries<T: IOEntry>(map: &BTreeMap<u32, u32>) -> Vec<T> {
-    map.iter()
+pub fn map_into_io_entries<T: IOEntry>(map: &MemorySegmentImage) -> Vec<T> {
+    map.addressed_iter()
         .flat_map(|(addr, val)| {
-            val.to_le_bytes()
-                .iter()
-                .enumerate()
-                .map(|(idx, byte)| T::new(addr + idx as u32, *byte))
-                .collect::<Vec<_>>()
+            (0..WORD_SIZE).map(move |idx| {
+                let val = val.to_le_bytes()[idx];
+                T::new_from_offset(addr, idx as u32, val)
+            })
         })
         .collect()
 }
@@ -188,12 +187,12 @@ pub struct View {
     pub(crate) memory_layout: Option<LinearMemoryLayout>,
     pub(crate) debug_logs: Vec<Vec<u8>>,
     pub(crate) program_memory: ProgramInfo,
+    // When not available, initial_memory can be None
     pub(crate) initial_memory: Vec<MemoryInitializationEntry>,
     /// The number of all addresses under RAM memory checking
     pub(crate) tracked_ram_size: usize,
     pub(crate) exit_code: Vec<PublicOutputEntry>,
     pub(crate) output_memory: Vec<PublicOutputEntry>,
-    // todo: incorporate into initial memory
     pub(crate) associated_data: Vec<u8>,
 }
 
@@ -269,6 +268,12 @@ impl View {
     /// Retrieve the raw debug logs, if any.
     pub fn view_debug_logs(&self) -> Option<Vec<Vec<u8>>> {
         Some(self.debug_logs.clone())
+    }
+
+    /// Return the memory layout, if any.
+    // TODO: Remove once we split Supply-Side and Demand-Side Interfaces
+    pub fn view_memory_layout(&self) -> Option<&LinearMemoryLayout> {
+        self.memory_layout.as_ref()
     }
 }
 

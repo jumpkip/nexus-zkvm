@@ -6,6 +6,7 @@ use nexus_vm::{riscv::BuiltinOpcode, SyscallCode};
 use crate::{
     column::Column::{self},
     components::AllLookupElements,
+    extensions::ExtensionsConfig,
     trace::{
         eval::{trace_eval, TraceEval},
         sidenote::SideNote,
@@ -25,6 +26,7 @@ impl MachineChip for SyscallChip {
         row_idx: usize,
         vm_step: &Option<ProgramStep>,
         _side_note: &mut SideNote,
+        _config: &ExtensionsConfig,
     ) {
         let vm_step = match vm_step {
             Some(vm_step) => vm_step,
@@ -65,6 +67,7 @@ impl MachineChip for SyscallChip {
                 traces.fill_columns(row_idx, true, Column::IsSysHeapReset);
                 traces.fill_columns(row_idx, result, Column::ValueA);
             }
+            (0x405, None) => traces.fill_columns(row_idx, true, Column::IsSysMemoryAdvise),
             _ => {
                 panic!(
                     "Unknown syscall number: 0x{:x} and result: {:?}, on row {}",
@@ -78,6 +81,7 @@ impl MachineChip for SyscallChip {
         eval: &mut E,
         trace_eval: &TraceEval<E>,
         _lookup_elements: &AllLookupElements,
+        _config: &ExtensionsConfig,
     ) {
         let [is_type_sys] = IsTypeSys::eval(trace_eval);
         let [is_sys_debug] = trace_eval!(trace_eval, Column::IsSysDebug);
@@ -86,6 +90,7 @@ impl MachineChip for SyscallChip {
         let [is_sys_cycle_count] = trace_eval!(trace_eval, Column::IsSysCycleCount);
         let [is_sys_stack_reset] = trace_eval!(trace_eval, Column::IsSysStackReset);
         let [is_sys_heap_reset] = trace_eval!(trace_eval, Column::IsSysHeapReset);
+        let [is_sys_madvise] = trace_eval!(trace_eval, Column::IsSysMemoryAdvise);
         let value_b = trace_eval!(trace_eval, Column::ValueB);
 
         // is_type_sys・				(b_val_3) = 0
@@ -113,6 +118,7 @@ impl MachineChip for SyscallChip {
                 &is_sys_stack_reset,
             ),
             (SyscallCode::OverwriteHeapPointer as u32, &is_sys_heap_reset),
+            (SyscallCode::MemoryAdvise as u32, &is_sys_madvise),
         ];
 
         eval.add_constraint(is_type_sys.clone() * value_b[2].clone());
@@ -141,18 +147,22 @@ impl MachineChip for SyscallChip {
                     + is_sys_cycle_count.clone()
                     + is_sys_stack_reset.clone()
                     + is_sys_heap_reset.clone()
+                    + is_sys_madvise.clone()
                     - E::F::one()),
         );
 
         // Enforcing values for op_a
-        // is_type_sys・(is_sys_debug + is_sys_halt + is_sys_cycle_count)・(op_a) = 0
+        // is_type_sys・(is_sys_debug + is_sys_halt + is_sys_cycle_count + is_sys_madvise)・(op_a) = 0
         // is_type_sys・(is_sys_priv_input + is_sys_heap_reset)・(10 - op_a) = 0
         // is_type_sys・(is_sys_stack_reset)・(2 - op_a) = 0
         let [op_a] = trace_eval!(trace_eval, Column::OpA);
 
         eval.add_constraint(
             is_type_sys.clone()
-                * (is_sys_debug.clone() + is_sys_halt.clone() + is_sys_cycle_count.clone())
+                * (is_sys_debug.clone()
+                    + is_sys_halt.clone()
+                    + is_sys_cycle_count.clone()
+                    + is_sys_madvise.clone())
                 * op_a.clone(),
         );
         eval.add_constraint(
@@ -173,7 +183,10 @@ impl MachineChip for SyscallChip {
         for a in value_a.chunks(2) {
             eval.add_constraint(
                 is_type_sys.clone()
-                    * (is_sys_debug.clone() + is_sys_halt.clone() + is_sys_cycle_count.clone())
+                    * (is_sys_debug.clone()
+                        + is_sys_halt.clone()
+                        + is_sys_cycle_count.clone()
+                        + is_sys_madvise.clone())
                     * (a[0].clone() + a[1].clone() * E::F::from(BaseField::from(256))),
             );
         }
@@ -256,7 +269,13 @@ mod test {
 
         // We iterate each block in the trace for each instruction
         for (row_idx, program_step) in program_steps.enumerate() {
-            Chips::fill_main_trace(&mut traces, row_idx, &program_step, &mut side_note);
+            Chips::fill_main_trace(
+                &mut traces,
+                row_idx,
+                &program_step,
+                &mut side_note,
+                &ExtensionsConfig::default(),
+            );
         }
         assert_chip::<Chips>(traces, Some(program_traces.finalize()));
     }

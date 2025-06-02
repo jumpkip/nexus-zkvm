@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod test {
-    use nexus_common::word_align;
+    use nexus_common::memory::alignment::Alignable;
     use nexus_common_testing::emulator::{
         compile_multi, emulate, parse_output, EmulatorType, IOArgs, Input, Output,
     };
@@ -8,7 +8,11 @@ mod test {
     use nexus_vm::elf::ElfFile;
     use nexus_vm::emulator::InternalView;
     use nexus_vm::trace::{k_trace, k_trace_direct};
-    use nexus_vm_prover::{prove, verify};
+    use nexus_vm_prover::{
+        extensions::ExtensionComponent,
+        machine::{BaseComponent, Machine},
+        prove, verify,
+    };
     use postcard::to_allocvec_cobs;
     use serial_test::serial;
     const K: usize = 1;
@@ -36,7 +40,7 @@ mod test {
         } else {
             Vec::new()
         };
-        let padded_len = word_align!(public_input_bytes.len());
+        let padded_len = public_input_bytes.len().word_align();
         public_input_bytes.resize(padded_len, 0x00);
 
         let mut private_input_bytes = if let Some(mut input) = io_args.private_input.clone() {
@@ -44,7 +48,7 @@ mod test {
         } else {
             Vec::new()
         };
-        let padded_len = word_align!(private_input_bytes.len());
+        let padded_len = private_input_bytes.len().word_align();
         private_input_bytes.resize(padded_len, 0x00);
 
         // Serialize expected output
@@ -54,7 +58,7 @@ mod test {
         } else {
             Vec::new()
         };
-        let padded_len = word_align!(expected_output_bytes.len());
+        let padded_len = expected_output_bytes.len().word_align();
         expected_output_bytes.resize(padded_len, 0x00);
 
         // Run emulation
@@ -128,13 +132,13 @@ mod test {
         let mut private_input_bytes = to_allocvec_cobs(&mut 2u32).unwrap();
         let mut expected_output_bytes = to_allocvec_cobs(&mut 1024u32).unwrap();
 
-        let padded_len = word_align!(public_input_bytes.len());
+        let padded_len = public_input_bytes.len().word_align();
         public_input_bytes.resize(padded_len, 0);
 
-        let padded_len = word_align!(private_input_bytes.len());
+        let padded_len = private_input_bytes.len().word_align();
         private_input_bytes.resize(padded_len, 0);
 
-        let padded_len = word_align!(expected_output_bytes.len());
+        let padded_len = expected_output_bytes.len().word_align();
         expected_output_bytes.resize(padded_len, 0);
 
         let (view, execution_trace) = k_trace(
@@ -373,6 +377,34 @@ mod test {
 
     #[test]
     #[serial]
+    fn test_prove_keccak_precompile() {
+        let elfs = compile_multi(
+            "examples/src/bin/keccak_precompile",
+            &["-C opt-level=3"],
+            &HOME_PATH,
+        );
+        let (view, execution_trace) =
+            k_trace(elfs[0].clone(), &[], &[], &[], K).expect("error generating trace");
+        let proof = Machine::<BaseComponent>::prove_with_extensions(
+            ExtensionComponent::keccak_extensions(),
+            &execution_trace,
+            &view,
+        )
+        .unwrap();
+        Machine::<BaseComponent>::verify_with_extensions(
+            ExtensionComponent::keccak_extensions(),
+            proof,
+            view.get_program_memory(),
+            view.view_associated_data().as_deref().unwrap_or_default(),
+            view.get_initial_memory(),
+            view.get_exit_code(),
+            view.get_public_output(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[serial]
     fn test_emulate_long_io() {
         test_example_multi(
             vec![
@@ -404,14 +436,9 @@ mod test {
         let mut expected_output_bytes =
             to_allocvec_cobs(&mut (true, 2u8, 4u16, 6u32, 8u64)).unwrap();
 
-        let padded_len = word_align!(public_input_bytes.len());
-        public_input_bytes.resize(padded_len, 0);
-
-        let padded_len = word_align!(private_input_bytes.len());
-        private_input_bytes.resize(padded_len, 0);
-
-        let padded_len = word_align!(expected_output_bytes.len());
-        expected_output_bytes.resize(padded_len, 0);
+        public_input_bytes.resize(public_input_bytes.len().word_align(), 0);
+        private_input_bytes.resize(private_input_bytes.len().word_align(), 0);
+        expected_output_bytes.resize(expected_output_bytes.len().word_align(), 0);
 
         let (view, execution_trace) = k_trace(
             elfs[0].clone(),

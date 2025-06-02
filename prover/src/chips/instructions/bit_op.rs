@@ -16,6 +16,7 @@ use crate::{
         self, IsAnd, IsOr, IsXor, ValueA, ValueA4_7, ValueB, ValueB4_7, ValueC, ValueC4_7,
     },
     components::AllLookupElements,
+    extensions::ExtensionsConfig,
     trace::{
         eval::{trace_eval, TraceEval},
         program_trace::ProgramTraces,
@@ -252,6 +253,7 @@ impl MachineChip for BitOpChip {
     fn draw_lookup_elements(
         all_elements: &mut AllLookupElements,
         channel: &mut impl stwo_prover::core::channel::Channel,
+        _config: &ExtensionsConfig,
     ) {
         all_elements.insert(BitOpLookupElements::draw(channel));
     }
@@ -261,6 +263,7 @@ impl MachineChip for BitOpChip {
         row_idx: usize,
         vm_step: &Option<ProgramStep>,
         side_note: &mut SideNote,
+        _config: &ExtensionsConfig,
     ) {
         let vm_step = match vm_step {
             Some(vm_step) => vm_step,
@@ -380,6 +383,7 @@ impl MachineChip for BitOpChip {
         eval: &mut E,
         trace_eval: &TraceEval<E>,
         lookup_elements: &AllLookupElements,
+        _config: &ExtensionsConfig,
     ) {
         let lookup_elements: &BitOpLookupElements = lookup_elements.as_ref();
 
@@ -433,11 +437,12 @@ impl MachineChip for BitOpChip {
 mod test {
     use crate::{
         chips::{AddChip, CpuChip, DecodingCheckChip, ProgramMemCheckChip, RegisterMemCheckChip},
-        extensions::ExtensionComponent,
+        extensions::{bit_op::BitOpMultiplicityEval, final_reg::FinalRegEval, ExtensionComponent},
         test_utils::assert_chip,
         trace::{
-            preprocessed::PreprocessedBuilder, program::iter_program_steps,
-            program_trace::ProgramTracesBuilder,
+            preprocessed::PreprocessedBuilder,
+            program::iter_program_steps,
+            program_trace::{ProgramTraceRef, ProgramTracesBuilder},
         },
     };
 
@@ -492,12 +497,19 @@ mod test {
 
         let mut traces = TracesBuilder::new(LOG_SIZE);
         let program_steps = iter_program_steps(&vm_traces, traces.num_rows());
+        let program_trace_ref = ProgramTraceRef::new_with_empty_memory(program_info);
         let program_trace = ProgramTracesBuilder::new_with_empty_memory(LOG_SIZE, program_info);
         let mut side_note = SideNote::new(&program_trace, &view);
 
         for (row_idx, program_step) in program_steps.enumerate() {
             // Fill in the main trace with the ValueB, valueC and Opcode
-            Chips::fill_main_trace(&mut traces, row_idx, &program_step, &mut side_note);
+            Chips::fill_main_trace(
+                &mut traces,
+                row_idx,
+                &program_step,
+                &mut side_note,
+                &ExtensionsConfig::default(),
+            );
         }
 
         let and_vals = traces
@@ -526,10 +538,20 @@ mod test {
 
         // verify that logup sums match
         let ext = ExtensionComponent::bit_op_multiplicity();
-        let (_, claimed_sum_2) = ext.generate_interaction_trace(&side_note, &lookup_elements);
+
+        let component_trace = ext.generate_component_trace(
+            BitOpMultiplicityEval::LOG_SIZE,
+            program_trace_ref,
+            &mut side_note,
+        );
+        let (_, claimed_sum_2) =
+            ext.generate_interaction_trace(component_trace, &side_note, &lookup_elements);
 
         let ext = ExtensionComponent::final_reg();
-        let (_, claimed_sum_3) = ext.generate_interaction_trace(&side_note, &lookup_elements);
+        let component_trace =
+            ext.generate_component_trace(FinalRegEval::LOG_SIZE, program_trace_ref, &mut side_note);
+        let (_, claimed_sum_3) =
+            ext.generate_interaction_trace(component_trace, &side_note, &lookup_elements);
         assert_eq!(
             claimed_sum_1 + claimed_sum_2 + claimed_sum_3,
             SecureField::zero()

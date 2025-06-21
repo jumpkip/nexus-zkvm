@@ -35,7 +35,7 @@ pub struct IOArgs<T: Input, U: Input, V: Output> {
     pub private_input: Option<U>,
     pub expected_output: Option<V>,
     pub expected_result:
-        Result<(Vec<InstructionResult>, MemoryTranscript), nexus_vm::error::VMError>,
+        Result<(Vec<InstructionResult>, MemoryTranscript), nexus_vm::error::VMErrorKind>,
 }
 
 impl<T: Input, U: Input, V: Output> Default for IOArgs<T, U, V> {
@@ -44,7 +44,7 @@ impl<T: Input, U: Input, V: Output> Default for IOArgs<T, U, V> {
             public_input: None,
             private_input: None,
             expected_output: None,
-            expected_result: Err(nexus_vm::error::VMError::VMExited(0)),
+            expected_result: Err(nexus_vm::error::VMErrorKind::VMExited(0)),
         }
     }
 }
@@ -59,7 +59,7 @@ impl<T: Input, U: Input, V: Output> IOArgs<T, U, V> {
             public_input: input,
             private_input,
             expected_output,
-            expected_result: Err(nexus_vm::error::VMError::VMExited(0)),
+            expected_result: Err(nexus_vm::error::VMErrorKind::VMExited(0)),
         }
     }
 
@@ -68,7 +68,7 @@ impl<T: Input, U: Input, V: Output> IOArgs<T, U, V> {
             public_input: None,
             private_input: None,
             expected_output: None,
-            expected_result: Err(nexus_vm::error::VMError::VMExited(1)),
+            expected_result: Err(nexus_vm::error::VMErrorKind::VMExited(1)),
         }
     }
 }
@@ -150,7 +150,7 @@ pub fn compile_guest_project(
     linker_path: &PathBuf,
     compile_flags: &str,
 ) -> Vec<u8> {
-    let target = "riscv32i-unknown-none-elf";
+    let target = "riscv32im-unknown-none-elf";
 
     let linker_script = std::env::current_dir().unwrap().join(linker_path);
 

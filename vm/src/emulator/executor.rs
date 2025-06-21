@@ -87,7 +87,7 @@
 //! use nexus_vm::elf::ElfFile;
 //! use nexus_vm::emulator::{LinearEmulator, LinearMemoryLayout};
 //! use nexus_vm::emulator::Emulator;
-//! use nexus_vm::error::VMError;
+//! use nexus_vm::error::VMErrorKind;
 //!
 //! let elf_file = ElfFile::from_path("test/fib_10.elf").expect("Unable to load ELF file");
 //! let memory_layout = LinearMemoryLayout::default();
@@ -100,7 +100,7 @@
 //!     &[]
 //! );
 //!
-//! assert_eq!(linear_emulator.execute(true), Err(VMError::VMExited(0)));
+//! assert_eq!(linear_emulator.execute(true).unwrap_err().source, VMErrorKind::VMExited(0));
 //! ```
 //!
 //! ### Creating a Linear Emulator from a Harvard Emulator
@@ -109,7 +109,7 @@
 //! use nexus_vm::elf::ElfFile;
 //! use nexus_vm::emulator::{HarvardEmulator, LinearEmulator};
 //! use nexus_vm::emulator::Emulator;
-//! use nexus_vm::error::VMError;
+//! use nexus_vm::error::VMErrorKind;
 //!
 //! let elf_file = ElfFile::from_path("test/fib_10.elf").expect("Unable to load ELF file");
 //! let harvard_emulator = HarvardEmulator::from_elf(&elf_file, &[], &[]);
@@ -124,7 +124,7 @@
 //!     &private_input,
 //! ).expect("Failed to create Linear Emulator from Harvard Emulator");
 //!
-//! assert_eq!(linear_emulator.execute(true), Err(VMError::VMExited(0)));
+//! assert_eq!(linear_emulator.execute(true).unwrap_err().source, VMErrorKind::VMExited(0));
 //! ```
 //!
 //! This module provides a flexible and efficient implementation of RISC-V emulation,
@@ -137,7 +137,7 @@ use super::{
 use crate::{
     cpu::{instructions::InstructionResult, Cpu},
     elf::ElfFile,
-    error::{Result, VMError},
+    error::{Result, VMErrorKind},
     memory::{
         FixedMemory, LoadOp, MemoryProcessor, MemoryRecords, MemorySegmentImage, Modes, StoreOp,
         UnifiedMemory, VariableMemory, NA, RO, RW, WO,
@@ -153,6 +153,7 @@ use nexus_common::{
     cpu::{InstructionExecutor, Registers},
     memory::MemAccessSize,
 };
+use num_traits::FromPrimitive;
 use rangemap::RangeMap;
 use std::{
     cmp::max,
@@ -629,7 +630,7 @@ impl Emulator for HarvardEmulator {
 
         let block = decode_until_end_of_a_block(self.instruction_memory.segment_words(pc, None));
         if block.is_empty() {
-            return Err(VMError::VMOutOfInstructions);
+            Err(VMErrorKind::VMOutOfInstructions)?
         }
 
         let entry = BasicBlockEntry::new(pc, block);
@@ -1090,7 +1091,7 @@ impl Emulator for LinearEmulator {
             None,
         )?);
         if block.is_empty() {
-            return Err(VMError::VMOutOfInstructions);
+            Err(VMErrorKind::VMOutOfInstructions)?
         }
 
         let entry = BasicBlockEntry::new(pc, block);
@@ -1132,12 +1133,13 @@ impl Emulator for LinearEmulator {
                         })
                         .collect();
 
+                    let om: &[u8] = om;
                     output_memory = om
                         .iter()
                         .enumerate()
-                        .map(|(i, byte)| PublicOutputEntry {
+                        .map(|(i, &byte)| PublicOutputEntry {
                             address: self.memory_layout.public_output_start() + i as u32,
-                            value: *byte,
+                            value: byte,
                         })
                         .collect();
                 }
@@ -1160,12 +1162,9 @@ impl Emulator for LinearEmulator {
                 let base_address =
                     self.memory_layout.public_input_start() + i as u32 * WORD_SIZE as u32;
                 let word = word_content.to_le_bytes();
-                word.into_iter()
-                    .enumerate()
-                    .map(move |(j, byte)| MemoryInitializationEntry {
-                        address: base_address + j as u32,
-                        value: byte,
-                    })
+                word.into_iter().enumerate().map(move |(j, byte)| {
+                    MemoryInitializationEntry::new(base_address + j as u32, byte)
+                })
             });
 
         let public_io_loc_iter = self
@@ -1177,37 +1176,65 @@ impl Emulator for LinearEmulator {
             .flat_map(|(i, word_content)| {
                 let base_address = 0x80 + i as u32 * WORD_SIZE as u32;
                 let word = word_content.to_le_bytes();
-                word.into_iter()
-                    .enumerate()
-                    .map(move |(j, byte)| MemoryInitializationEntry {
-                        address: base_address + j as u32,
-                        value: byte,
-                    })
-            });
-        // TODO: avoid creating a BtreeMap and produce an iterator directly
-        let rom_initialization = match self.static_rom_image_index {
-            None => BTreeMap::new(),
-            Some(uidx) => self
-                .memory
-                .addr_val_bytes(uidx)
-                .expect("invalid static_rom_image_index"),
-        };
-        let rom_iter = rom_initialization
-            .iter()
-            .map(|(addr, byte)| MemoryInitializationEntry {
-                address: *addr,
-                value: *byte,
+                word.into_iter().enumerate().map(move |(j, byte)| {
+                    MemoryInitializationEntry::new(base_address + j as u32, byte)
+                })
             });
 
+        let mut rom_count = 0;
+        let rom_iter = match self.static_rom_image_index {
+            None => std::iter::empty().collect::<Vec<_>>().into_iter(),
+            Some((store, idx)) => match Modes::from_usize(store) {
+                Some(Modes::RW) => {
+                    let mem_ro: FixedMemory<RO> = self.memory.frw_store[idx].clone().into();
+                    mem_ro
+                        .addr_val_bytes_iter()
+                        .inspect(|_| rom_count += 1)
+                        .map(|(address, value)| MemoryInitializationEntry::new(address, value))
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                }
+                Some(Modes::RO) => {
+                    let mem_ro: FixedMemory<RO> = self.memory.fro_store[idx].clone();
+                    mem_ro
+                        .addr_val_bytes_iter()
+                        .inspect(|_| rom_count += 1)
+                        .map(|(address, value)| MemoryInitializationEntry::new(address, value))
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                }
+                Some(Modes::WO) => {
+                    let mem_na: FixedMemory<NA> = self.memory.fwo_store[idx].clone().into();
+                    mem_na
+                        .addr_val_bytes_iter()
+                        .inspect(|_| rom_count += 1)
+                        .map(|(address, value)| MemoryInitializationEntry::new(address, value))
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                }
+                Some(Modes::NA) => {
+                    let mem_na: FixedMemory<NA> = self.memory.fna_store[idx].clone();
+                    mem_na
+                        .addr_val_bytes_iter()
+                        .inspect(|_| rom_count += 1)
+                        .map(|(address, value)| MemoryInitializationEntry::new(address, value))
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                }
+                _ => std::iter::empty().collect::<Vec<_>>().into_iter(),
+            },
+        };
         let ram_initialization = &self.initial_static_ram_image;
         let ram_iter =
             ram_initialization
                 .as_byte_slice()
                 .iter()
                 .enumerate()
-                .map(|(offset, byte)| MemoryInitializationEntry {
-                    address: offset as u32 + self.initial_static_ram_image.base(),
-                    value: *byte,
+                .map(|(offset, byte)| {
+                    MemoryInitializationEntry::new(
+                        offset as u32 + self.initial_static_ram_image.base(),
+                        *byte,
+                    )
                 });
 
         let debug_logs: Vec<Vec<u8>> = if self.get_executor().logs.is_some() {
@@ -1235,7 +1262,7 @@ impl Emulator for LinearEmulator {
 
         let tracked_ram_size = self
             .memory_layout
-            .tracked_ram_size(self.initial_static_ram_image.len_bytes() + rom_initialization.len());
+            .tracked_ram_size(self.initial_static_ram_image.len_bytes() + rom_count);
 
         View {
             memory_layout: Some(self.memory_layout),
@@ -1323,7 +1350,10 @@ mod tests {
 
         let mut emulator = HarvardEmulator::from_elf(&elf_file, &[], &[]);
 
-        assert_eq!(emulator.execute(false), Err(VMError::VMExited(0)));
+        assert_eq!(
+            emulator.execute(false).unwrap_err().source,
+            VMErrorKind::VMExited(0)
+        );
     }
 
     #[test]
@@ -1356,7 +1386,10 @@ mod tests {
         let basic_blocks = setup_basic_block_ir();
         let mut emulator = HarvardEmulator::from_basic_blocks(&basic_blocks);
 
-        assert_eq!(emulator.execute(false), Err(VMError::VMOutOfInstructions));
+        assert_eq!(
+            emulator.execute(false).unwrap_err().source,
+            VMErrorKind::VMOutOfInstructions
+        );
     }
 
     #[test]
@@ -1367,7 +1400,10 @@ mod tests {
         let mut emulator =
             LinearEmulator::from_elf(LinearMemoryLayout::default(), &[], &elf_file, &[], &[]);
 
-        assert_eq!(emulator.execute(false), Err(VMError::VMExited(0)));
+        assert_eq!(
+            emulator.execute(false).unwrap_err().source,
+            VMErrorKind::VMExited(0)
+        );
     }
 
     #[test]
@@ -1377,11 +1413,17 @@ mod tests {
 
         let mut harvard = HarvardEmulator::from_elf(&elf_file, &[], &[]);
 
-        assert_eq!(harvard.execute(false), Err(VMError::VMExited(0)));
+        assert_eq!(
+            harvard.execute(false).unwrap_err().source,
+            VMErrorKind::VMExited(0)
+        );
 
         let mut linear = LinearEmulator::from_harvard(&harvard, elf_file, &[], &[]).unwrap();
 
-        assert_eq!(linear.execute(false), Err(VMError::VMExited(0)));
+        assert_eq!(
+            linear.execute(false).unwrap_err().source,
+            VMErrorKind::VMExited(0)
+        );
     }
 
     #[test]
@@ -1419,11 +1461,17 @@ mod tests {
         let mut emulator = HarvardEmulator::default();
         let res = emulator.execute_basic_block(&basic_block_entry, false);
 
-        assert_eq!(res, Err(VMError::UndefinedInstruction(op.clone())));
+        assert_eq!(
+            res.unwrap_err().source,
+            VMErrorKind::UndefinedInstruction(op.clone())
+        );
 
         let mut emulator = LinearEmulator::default();
         let res = emulator.execute_basic_block(&basic_block_entry, false);
 
-        assert_eq!(res, Err(VMError::UndefinedInstruction(op)));
+        assert_eq!(
+            res.unwrap_err().source,
+            VMErrorKind::UndefinedInstruction(op)
+        );
     }
 }

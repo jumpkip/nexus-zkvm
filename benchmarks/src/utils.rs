@@ -1,8 +1,14 @@
-use chrono;
+#[cfg(unix)]
 use libc::{getrusage, rusage, RUSAGE_CHILDREN, RUSAGE_SELF};
-use std::{fs::OpenOptions, io::Write, time::Duration};
+use std::{fs::OpenOptions, io::Write};
 
 use crate::{models::BenchmarkResult, paths::results_file};
+
+/// Cross-platform timing state
+#[cfg(unix)]
+pub type TimingState = (std::time::Instant, rusage, rusage);
+#[cfg(windows)]
+pub type TimingState = std::time::Instant;
 
 /// Gets a timestamped version of a filename by appending timestamp and .csv extension.
 pub fn get_timestamped_filename(base_name: &str) -> String {
@@ -28,21 +34,47 @@ pub fn record_benchmark_results(result: &BenchmarkResult, filename: &str) {
 }
 
 /// Start timing and return resource usage.
+#[cfg(unix)]
 pub fn start_timer(usage_type: i32) -> rusage {
     let mut usage: rusage = unsafe { std::mem::zeroed() };
     unsafe { getrusage(usage_type, &mut usage) };
     usage
 }
 
+/// Start timing and return resource usage (Windows stub).
+#[cfg(windows)]
+pub fn start_timer(_usage_type: i32) -> std::time::Instant {
+    std::time::Instant::now()
+}
+
 /// Stop timing and return user and system time differences.
-pub fn stop_timer(start_usage: &rusage, usage_type: i32) -> (Duration, Duration) {
+#[cfg(unix)]
+pub fn stop_timer(
+    start_usage: &rusage,
+    usage_type: i32,
+) -> (std::time::Duration, std::time::Duration) {
     let mut end_usage: rusage = unsafe { std::mem::zeroed() };
     unsafe { getrusage(usage_type, &mut end_usage) };
     calculate_time_diff(start_usage, &end_usage)
 }
 
+/// Stop timing and return user and system time differences (Windows stub).
+#[cfg(windows)]
+pub fn stop_timer(
+    start_time: &std::time::Instant,
+    _usage_type: i32,
+) -> (std::time::Duration, std::time::Duration) {
+    let elapsed = start_time.elapsed();
+    // On Windows, we can't easily separate user and system time, so return elapsed time for both
+    (elapsed, std::time::Duration::ZERO)
+}
+
 /// Calculate user and system time differences between two rusage measurements.
-pub fn calculate_time_diff(start_usage: &rusage, end_usage: &rusage) -> (Duration, Duration) {
+#[cfg(unix)]
+pub fn calculate_time_diff(
+    start_usage: &rusage,
+    end_usage: &rusage,
+) -> (std::time::Duration, std::time::Duration) {
     let user_sec_diff = end_usage.ru_utime.tv_sec - start_usage.ru_utime.tv_sec;
     let user_usec_diff = end_usage.ru_utime.tv_usec - start_usage.ru_utime.tv_usec;
 
@@ -62,8 +94,10 @@ pub fn calculate_time_diff(start_usage: &rusage, end_usage: &rusage) -> (Duratio
         (sys_sec_diff, sys_usec_diff)
     };
 
-    let user_time = Duration::from_secs(user_sec as u64) + Duration::from_micros(user_usec as u64);
-    let sys_time = Duration::from_secs(sys_sec as u64) + Duration::from_micros(sys_usec as u64);
+    let user_time = std::time::Duration::from_secs(user_sec as u64)
+        + std::time::Duration::from_micros(user_usec as u64);
+    let sys_time = std::time::Duration::from_secs(sys_sec as u64)
+        + std::time::Duration::from_micros(sys_usec as u64);
 
     (user_time, sys_time)
 }
@@ -80,13 +114,13 @@ pub struct PhaseMetrics {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DurationTracker {
     pub ct: usize,
-    pub min: Duration,
-    pub avg: Duration,
-    pub max: Duration,
+    pub min: std::time::Duration,
+    pub avg: std::time::Duration,
+    pub max: std::time::Duration,
 }
 
 impl DurationTracker {
-    pub fn update(&mut self, next: &Duration) {
+    pub fn update(&mut self, next: &std::time::Duration) {
         let prev = self.ct as f64;
         self.ct += 1;
 
@@ -151,9 +185,9 @@ pub struct PhasesTracker {
 impl PhasesTracker {
     pub fn update(
         &mut self,
-        next_duration: &Duration,
-        next_user: &Duration,
-        next_sys: &Duration,
+        next_duration: &std::time::Duration,
+        next_user: &std::time::Duration,
+        next_sys: &std::time::Duration,
         next_metrics: &PhaseMetrics,
     ) {
         self.duration.update(next_duration);
@@ -164,7 +198,8 @@ impl PhasesTracker {
 }
 
 /// Start measuring a phase and return initial state.
-pub fn phase_start() -> (std::time::Instant, rusage, rusage) {
+#[cfg(unix)]
+pub fn phase_start() -> TimingState {
     let mut initial_self_usage: rusage = unsafe { std::mem::zeroed() };
     let mut initial_children_usage: rusage = unsafe { std::mem::zeroed() };
     unsafe {
@@ -178,12 +213,23 @@ pub fn phase_start() -> (std::time::Instant, rusage, rusage) {
     )
 }
 
+/// Start measuring a phase and return initial state (Windows stub).
+#[cfg(windows)]
+pub fn phase_start() -> TimingState {
+    std::time::Instant::now()
+}
+
 /// End measuring a phase and return duration and metrics.
+#[cfg(unix)]
 pub fn phase_end(
-    start_time: std::time::Instant,
-    initial_self_usage: rusage,
-    initial_children_usage: rusage,
-) -> (Duration, Duration, Duration, PhaseMetrics) {
+    timing_state: TimingState,
+) -> (
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+    PhaseMetrics,
+) {
+    let (start_time, initial_self_usage, initial_children_usage) = timing_state;
     let mut final_self_usage: rusage = unsafe { std::mem::zeroed() };
     let mut final_children_usage: rusage = unsafe { std::mem::zeroed() };
     unsafe {
@@ -255,6 +301,29 @@ pub fn phase_end(
         PhaseMetrics {
             peak_cpu: cpu_percentage,
             peak_memory_gb,
+        },
+    )
+}
+
+/// End measuring a phase and return duration and metrics (Windows stub).
+#[cfg(windows)]
+pub fn phase_end(
+    timing_state: TimingState,
+) -> (
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+    PhaseMetrics,
+) {
+    let start_time = timing_state;
+    let duration = start_time.elapsed();
+    (
+        duration,
+        duration,                  // User time approximation
+        std::time::Duration::ZERO, // System time
+        PhaseMetrics {
+            peak_cpu: 0.0,       // Not measurable on Windows easily
+            peak_memory_gb: 0.0, // Not measurable on Windows easily
         },
     )
 }

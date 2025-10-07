@@ -1,13 +1,15 @@
 use num_traits::One;
-use stwo_prover::{
-    constraint_framework::{EvalAtRow, RelationEntry},
+use stwo::{
     core::{
-        backend::simd::{m31::PackedBaseField, SimdBackend},
         fields::{m31::BaseField, qm31::SecureField},
-        poly::{circle::CircleEvaluation, BitReversedOrder},
         ColumnVec,
     },
+    prover::{
+        backend::simd::{m31::PackedBaseField, SimdBackend},
+        poly::{circle::CircleEvaluation, BitReversedOrder},
+    },
 };
+use stwo_constraint_framework::{EvalAtRow, RelationEntry};
 
 use nexus_vm::WORD_SIZE;
 use nexus_vm_prover_trace::{
@@ -19,10 +21,10 @@ use crate::{
     components::cpu::preprocessed_clk_trace,
     framework::BuiltInComponent,
     lookups::{
-        AllLookupElements, ComponentLookupElements, CpuToRegisterMemoryLookupElements,
-        InstToRegisterMemoryLookupElements, LogupTraceBuilder, RegisterMemoryLookupElements,
+        AllLookupElements, ComponentLookupElements, InstToRegisterMemoryLookupElements,
+        LogupTraceBuilder, RangeCheckLookupElements, RegisterMemoryLookupElements,
     },
-    side_note::SideNote,
+    side_note::{program::ProgramTraceRef, SideNote},
 };
 
 mod columns;
@@ -45,10 +47,14 @@ impl BuiltInComponent for RegisterMemory {
     type LookupElements = (
         RegisterMemoryLookupElements,
         InstToRegisterMemoryLookupElements,
-        CpuToRegisterMemoryLookupElements,
+        RangeCheckLookupElements,
     );
 
-    fn generate_preprocessed_trace(&self, log_size: u32, _side_note: &SideNote) -> FinalizedTrace {
+    fn generate_preprocessed_trace(
+        &self,
+        log_size: u32,
+        _program: &ProgramTraceRef,
+    ) -> FinalizedTrace {
         let mut trace = preprocessed_clk_trace(log_size);
 
         trace.extend(preprocessed_timestamp_trace(log_size, 2));
@@ -74,29 +80,64 @@ impl BuiltInComponent for RegisterMemory {
         ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
         SecureField,
     ) {
-        let (rel_reg_memory_read_write, rel_inst_to_reg_memory, rel_cpu_to_reg_memory) =
+        let (rel_reg_memory_read_write, rel_inst_to_reg_memory, range_check) =
             Self::LookupElements::get(lookup_elements);
         let mut logup_trace_builder = LogupTraceBuilder::new(component_trace.log_size());
 
         let [is_local_pad] = original_base_column!(component_trace, Column::IsLocalPad);
         let clk = preprocessed_base_column!(component_trace, PreprocessedColumn::Clk);
-        let reg1_val = original_base_column!(component_trace, Column::Reg1Val);
-        let reg2_val = original_base_column!(component_trace, Column::Reg2Val);
-        let reg3_val = original_base_column!(component_trace, Column::Reg3Val);
 
         let [reg1_addr] = original_base_column!(component_trace, Column::Reg1Addr);
         let [reg2_addr] = original_base_column!(component_trace, Column::Reg2Addr);
         let [reg3_addr] = original_base_column!(component_trace, Column::Reg3Addr);
+
+        let reg1_val = original_base_column!(component_trace, Column::Reg1Val);
+        let reg2_val = original_base_column!(component_trace, Column::Reg2Val);
+        let reg3_val = original_base_column!(component_trace, Column::Reg3Val);
 
         let [reg1_accessed] = original_base_column!(component_trace, Column::Reg1Accessed);
         let [reg2_accessed] = original_base_column!(component_trace, Column::Reg2Accessed);
         let [reg3_accessed] = original_base_column!(component_trace, Column::Reg3Accessed);
         let [reg3_write] = original_base_column!(component_trace, Column::Reg3Write);
 
+        let reg1_ts_prev = original_base_column!(component_trace, Column::Reg1TsPrev);
+        let reg2_ts_prev = original_base_column!(component_trace, Column::Reg2TsPrev);
+        let reg3_ts_prev = original_base_column!(component_trace, Column::Reg3TsPrev);
+
+        let reg1_ts_prev_aux = original_base_column!(component_trace, Column::Reg1TsPrevAux);
+        let reg2_ts_prev_aux = original_base_column!(component_trace, Column::Reg2TsPrevAux);
+        let reg3_ts_prev_aux = original_base_column!(component_trace, Column::Reg3TsPrevAux);
+
+        for timestamp_bytes in [
+            &reg1_ts_prev,
+            &reg2_ts_prev,
+            &reg3_ts_prev,
+            &reg1_ts_prev_aux,
+            &reg2_ts_prev_aux,
+            &reg3_ts_prev_aux,
+        ] {
+            range_check.range256.generate_logup_col(
+                &mut logup_trace_builder,
+                is_local_pad.clone(),
+                timestamp_bytes,
+            );
+        }
+        range_check.range256.generate_logup_col(
+            &mut logup_trace_builder,
+            is_local_pad.clone(),
+            &reg3_val,
+        );
+
         // consume(
         //     rel-inst-to-reg-memory,
         //     1 − is-local-pad,
-        //     (clk, reg3-val, reg1-val, reg2-val, reg1-accessed, reg2-accessed, reg3-accessed, reg3-write)
+        //     (
+        //         clk,
+        //         reg3-addr, reg1-addr, reg2-addr,
+        //         reg3-val, reg1-val, reg2-val,
+        //         reg1-accessed, reg2-accessed, reg3-accessed,
+        //         reg3-write
+        //     )
         // )
         logup_trace_builder.add_to_relation_with(
             &rel_inst_to_reg_memory,
@@ -104,20 +145,13 @@ impl BuiltInComponent for RegisterMemory {
             |[is_local_pad]| (is_local_pad - PackedBaseField::one()).into(),
             &[
                 clk.as_slice(),
+                &[reg3_addr, reg1_addr, reg2_addr],
                 &reg3_val,
                 &reg1_val,
                 &reg2_val,
                 &[reg1_accessed, reg2_accessed, reg3_accessed, reg3_write],
             ]
             .concat(),
-        );
-
-        // consume(rel-cpu-to-reg-memory, 1 − is-local-pad, (clk, reg3-addr, reg1-addr, reg2-addr))
-        logup_trace_builder.add_to_relation_with(
-            &rel_cpu_to_reg_memory,
-            [is_local_pad],
-            |[is_local_pad]| (is_local_pad - PackedBaseField::one()).into(),
-            &[clk.as_slice(), &[reg3_addr, reg1_addr, reg2_addr]].concat(),
         );
 
         // consume(rel-reg-memory-read-write, reg1-accessed, (reg1-addr, reg1-val, reg1-ts-prev))
@@ -189,12 +223,11 @@ impl BuiltInComponent for RegisterMemory {
         trace_eval: TraceEval<Self::PreprocessedColumn, Self::MainColumn, E>,
         lookup_elements: &Self::LookupElements,
     ) {
-        RegisterMemory::constrain_timestamps(eval, &trace_eval);
-        RegisterMemory::constrain_reg3(eval, &trace_eval);
+        let (rel_reg_memory_read_write, rel_inst_to_reg_memory, range_check) = lookup_elements;
+        RegisterMemory::constrain_timestamps(eval, &trace_eval, range_check);
+        RegisterMemory::constrain_reg3(eval, &trace_eval, range_check);
 
         // Logup Interactions
-        let (rel_reg_memory_read_write, rel_inst_to_reg_memory, rel_cpu_to_reg_memory) =
-            lookup_elements;
 
         let [is_local_pad] = trace_eval!(trace_eval, Column::IsLocalPad);
         let clk = preprocessed_trace_eval!(trace_eval, PreprocessedColumn::Clk);
@@ -214,13 +247,20 @@ impl BuiltInComponent for RegisterMemory {
         // consume(
         //     rel-inst-to-reg-memory,
         //     1 − is-local-pad,
-        //     (clk, reg3-val, reg1-val, reg2-val, reg1-accessed, reg2-accessed, reg3-accessed, reg3-write)
+        //     (
+        //         clk,
+        //         reg3-addr, reg1-addr, reg2-addr,
+        //         reg3-val, reg1-val, reg2-val,
+        //         reg1-accessed, reg2-accessed, reg3-accessed,
+        //         reg3-write
+        //     )
         // )
         eval.add_to_relation(RelationEntry::new(
             rel_inst_to_reg_memory,
             (is_local_pad.clone() - E::F::one()).into(),
             &[
                 clk.as_slice(),
+                &[reg3_addr, reg1_addr, reg2_addr],
                 &reg3_val,
                 &reg1_val,
                 &reg2_val,
@@ -232,13 +272,6 @@ impl BuiltInComponent for RegisterMemory {
                 ],
             ]
             .concat(),
-        ));
-
-        // consume(rel-cpu-to-reg-memory, 1 − is-local-pad, (clk, reg3-addr, reg1-addr, reg2-addr))
-        eval.add_to_relation(RelationEntry::new(
-            rel_cpu_to_reg_memory,
-            (is_local_pad.clone() - E::F::one()).into(),
-            &[clk.as_slice(), &[reg3_addr, reg1_addr, reg2_addr]].concat(),
         ));
 
         // consume(rel-reg-memory-read-write, reg1-accessed, (reg1-addr, reg1-val, reg1-ts-prev))
@@ -404,7 +437,8 @@ mod tests {
 
     use crate::{
         components::{
-            register_memory_boundary::RegisterMemoryBoundary, Cpu, CpuBoundary, ADD, ADDI,
+            register_memory_boundary::RegisterMemoryBoundary, Cpu, CpuBoundary, ProgramMemory,
+            ProgramMemoryBoundary, ADD, ADDI, RANGE16, RANGE256, RANGE64, RANGE8,
         },
         framework::test_utils::{assert_component, components_claimed_sum, AssertContext},
     };
@@ -413,6 +447,8 @@ mod tests {
     fn assert_register_memory_constraints() {
         let basic_block = vec![BasicBlock::new(vec![
             Instruction::new_ir(Opcode::from(BuiltinOpcode::ADDI), 1, 0, 1),
+            Instruction::new_ir(Opcode::from(BuiltinOpcode::ADD), 1, 1, 1),
+            Instruction::new_ir(Opcode::from(BuiltinOpcode::ADD), 1, 1, 1),
             Instruction::new_ir(Opcode::from(BuiltinOpcode::ADD), 2, 1, 0),
             Instruction::new_ir(Opcode::from(BuiltinOpcode::ADD), 3, 2, 1),
             Instruction::new_ir(Opcode::from(BuiltinOpcode::ADD), 4, 3, 2),
@@ -430,7 +466,19 @@ mod tests {
         let mut claimed_sum = assert_component(RegisterMemory, assert_ctx);
 
         claimed_sum += components_claimed_sum(
-            &[&Cpu, &CpuBoundary, &RegisterMemoryBoundary, &ADD, &ADDI],
+            &[
+                &Cpu,
+                &CpuBoundary,
+                &ProgramMemory,
+                &ProgramMemoryBoundary,
+                &RegisterMemoryBoundary,
+                &ADD,
+                &ADDI,
+                &RANGE8,
+                &RANGE16,
+                &RANGE64,
+                &RANGE256,
+            ],
             assert_ctx,
         );
 

@@ -54,7 +54,16 @@ impl CheckedView for nexus_core::nvm::View {
 
         let program_memory = elf_into_program_info(&converted_elf, memory_layout);
 
-        let initial_memory = slice_into_io_entries::<MemoryInitializationEntry>(
+        let input_memory = slice_into_io_entries::<MemoryInitializationEntry>(
+            memory_layout.public_input_start(),
+            &[
+                &(expected_public_input.len() as u32).to_le_bytes(),
+                expected_public_input,
+            ]
+            .concat(),
+        );
+
+        let ro_initial_memory = slice_into_io_entries::<MemoryInitializationEntry>(
             memory_layout.public_input_address_location(),
             &[
                 memory_layout.public_input_start().to_le_bytes(),
@@ -64,20 +73,11 @@ impl CheckedView for nexus_core::nvm::View {
         )
         .iter()
         .chain(map_into_io_entries::<MemoryInitializationEntry>(&expected_elf.rom_image).iter())
-        .chain(map_into_io_entries::<MemoryInitializationEntry>(&expected_elf.ram_image).iter())
-        .chain(
-            slice_into_io_entries::<MemoryInitializationEntry>(
-                memory_layout.public_input_start(),
-                &[
-                    &(expected_public_input.len() as u32).to_le_bytes(),
-                    expected_public_input,
-                ]
-                .concat(),
-            )
-            .iter(),
-        )
         .copied()
         .collect();
+
+        let rw_initial_memory =
+            map_into_io_entries::<MemoryInitializationEntry>(&expected_elf.ram_image);
 
         let exit_code = slice_into_io_entries::<PublicOutputEntry>(
             memory_layout.exit_code(),
@@ -96,7 +96,9 @@ impl CheckedView for nexus_core::nvm::View {
             &Some(*memory_layout),
             &Vec::new(),
             &program_memory,
-            &initial_memory,
+            &ro_initial_memory,
+            &rw_initial_memory,
+            &input_memory,
             memory_layout.tracked_ram_size(static_memory_size),
             &exit_code,
             &output_memory,
@@ -258,10 +260,7 @@ pub trait Prover: Sized {
     ) -> Result<Self::View, <Self as Prover>::Error>;
 
     /// Run the zkVM and return a verifiable proof, along with a view of the execution output.
-    fn prove(self) -> Result<(Self::View, Self::Proof), <Self as Prover>::Error>
-    where
-        Self: Sized,
-    {
+    fn prove(self) -> Result<(Self::View, Self::Proof), <Self as Prover>::Error> {
         Self::prove_with_input::<(), ()>(self, &(), &())
     }
 
@@ -447,9 +446,8 @@ pub trait Verifiable: Serialize + DeserializeOwned {
         let mut input_encoded =
             postcard::to_stdvec(&expected_public_input).map_err(IOError::from)?;
         if !input_encoded.is_empty() {
-            let input = expected_public_input.to_owned();
-
-            input_encoded = postcard::to_stdvec_cobs(&input).map_err(IOError::from)?;
+            input_encoded =
+                postcard::to_stdvec_cobs(&expected_public_input).map_err(IOError::from)?;
             let input_padded_len = (input_encoded.len() + 3) & !3;
 
             assert!(input_padded_len >= input_encoded.len());
@@ -459,9 +457,8 @@ pub trait Verifiable: Serialize + DeserializeOwned {
         let mut output_encoded =
             postcard::to_stdvec(&expected_public_output).map_err(IOError::from)?;
         if !output_encoded.is_empty() {
-            let output = expected_public_output.to_owned();
-
-            output_encoded = postcard::to_stdvec_cobs(&output).map_err(IOError::from)?;
+            output_encoded =
+                postcard::to_stdvec_cobs(&expected_public_output).map_err(IOError::from)?;
             let output_padded_len = (output_encoded.len() + 3) & !3;
 
             assert!(output_padded_len >= output_encoded.len());

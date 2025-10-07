@@ -44,6 +44,34 @@ impl ProgramStep<'_> {
         self.regs.read(self.step.instruction.op_a).to_le_bytes()
     }
 
+    /// Returns the value of the destination register (rd) after execution.
+    /// For instructions that don't write to rd, returns the original value.
+    pub fn get_reg3_result_value(&self) -> Word {
+        if let Some(syscall_code) = self.get_syscall_code() {
+            if Self::syscall_accessed_reg3(syscall_code) {
+                return self.get_result().expect("syscall must have a result");
+            } else {
+                return self.get_value_a();
+            }
+        }
+
+        let instr = &self.step.instruction;
+        if matches!(
+            instr.ins_type,
+            InstructionType::SType | InstructionType::BType
+        ) {
+            self.get_value_a()
+        } else {
+            self.get_result().expect("instruction must have a result")
+        }
+    }
+
+    pub fn syscall_accessed_reg3(syscall_code: u32) -> bool {
+        syscall_code == SyscallCode::ReadFromPrivateInput as u32
+            || syscall_code == SyscallCode::OverwriteStackPointer as u32
+            || syscall_code == SyscallCode::OverwriteHeapPointer as u32
+    }
+
     /// Returns the value of the second operand (rs1 or rs2) as bytes.
     /// Always a register value in range u32.
     pub fn get_value_b(&self) -> Word {
@@ -129,7 +157,7 @@ impl ProgramStep<'_> {
     }
 
     /// Returns true if the valueA register is x0 register.
-    pub fn value_a_effectitve_flag(&self) -> bool {
+    pub fn value_a_effective_flag(&self) -> bool {
         self.get_op_a() != Register::X0
     }
 

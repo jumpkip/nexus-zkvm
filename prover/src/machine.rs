@@ -1,19 +1,23 @@
 use std::marker::PhantomData;
 
 use num_traits::Zero;
-use stwo_prover::{
-    constraint_framework::TraceLocationAllocator,
+use stwo::{
     core::{
-        air::{Component, ComponentProver},
-        backend::simd::SimdBackend,
+        air::Component,
         channel::{Blake2sChannel, Channel},
         fields::qm31::SecureField,
-        pcs::{CommitmentSchemeProver, CommitmentSchemeVerifier, PcsConfig, TreeVec},
-        poly::circle::{CanonicCoset, PolyOps},
-        prover::{prove, verify, ProvingError, StarkProof, VerificationError},
+        pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec},
+        poly::circle::CanonicCoset,
+        proof::StarkProof,
         vcs::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher},
+        verifier::{verify, VerificationError},
+    },
+    prover::{
+        backend::simd::SimdBackend, poly::circle::PolyOps, prove, CommitmentSchemeProver,
+        ComponentProver, ProvingError,
     },
 };
+use stwo_constraint_framework::TraceLocationAllocator;
 
 use super::trace::eval::{INTERACTION_TRACE_IDX, ORIGINAL_TRACE_IDX, PREPROCESSED_TRACE_IDX};
 use super::trace::{
@@ -143,7 +147,13 @@ impl<C: MachineChip + Sync> Machine<C> {
         let mut prover_traces = TracesBuilder::new(log_size);
         let program_trace_ref = ProgramTraceRef {
             program_memory: view.get_program_memory(),
-            init_memory: view.get_initial_memory(),
+            init_memory: &[
+                // preprocessed trace is sensitive to this ordering
+                view.get_ro_initial_memory(),
+                view.get_rw_initial_memory(),
+                view.get_public_input(),
+            ]
+            .concat(),
             exit_code: view.get_exit_code(),
             public_output: view.get_public_output(),
         };
@@ -508,7 +518,12 @@ mod tests {
             proof,
             view.get_program_memory(),
             &[],
-            view.get_initial_memory(),
+            &[
+                view.get_public_input(),
+                view.get_ro_initial_memory(),
+                view.get_rw_initial_memory(),
+            ]
+            .concat(),
             view.get_exit_code(),
             view.get_public_output(),
         )

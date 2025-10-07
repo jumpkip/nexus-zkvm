@@ -158,8 +158,8 @@ use rangemap::RangeMap;
 use std::{
     cmp::max,
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    rc::Rc,
 };
-
 #[derive(Debug, Default)]
 pub struct Executor {
     // The CPU
@@ -178,7 +178,7 @@ pub struct Executor {
     basic_block_ref_cache: RangeMap<u32, u32>,
 
     // Basic block cache to improve performance
-    basic_block_cache: BTreeMap<u32, BasicBlockEntry>,
+    basic_block_cache: BTreeMap<u32, Rc<BasicBlockEntry>>,
 
     // The base address of the program
     base_address: u32,
@@ -275,7 +275,7 @@ pub trait Emulator {
     ///
     /// # Returns
     /// if success, return a `BasicBlockEntry` starting at the current PC.
-    fn fetch_block(&mut self, pc: u32) -> Result<BasicBlockEntry>;
+    fn fetch_block(&mut self, pc: u32) -> Result<Rc<BasicBlockEntry>>;
 
     /// Return a reference to the internal executor component used by the emulator.
     fn get_executor(&self) -> &Executor;
@@ -289,16 +289,11 @@ pub trait Emulator {
         basic_block_entry: &BasicBlockEntry,
         force_provable_transcript: bool,
     ) -> Result<(Vec<InstructionResult>, MemoryTranscript)> {
-        #[cfg(debug_assertions)]
-        basic_block_entry
-            .block
-            .print_with_offset(self.get_executor().cpu.pc.value as usize);
-
-        let mut results: Vec<InstructionResult> = Vec::new();
-        let mut transcript: MemoryTranscript = Vec::new();
-
         let at = (self.get_executor().cpu.pc.value as usize - basic_block_entry.start as usize)
             / WORD_SIZE;
+        let block_size = basic_block_entry.block.0.len() - at;
+        let mut results: Vec<InstructionResult> = Vec::with_capacity(block_size);
+        let mut transcript: MemoryTranscript = Vec::with_capacity(block_size);
 
         // Execute the instructions in the basic block
         for instruction in basic_block_entry.block.0[at..].iter() {
@@ -590,11 +585,11 @@ impl Emulator for HarvardEmulator {
 
         let mut memory_records = MemoryRecords::new();
 
-        load_ops.clone().iter().for_each(|op| {
+        load_ops.iter().for_each(|op| {
             memory_records.insert(op.as_record(self.executor.global_clock));
         });
 
-        store_ops.clone().iter().for_each(|op| {
+        store_ops.iter().for_each(|op| {
             memory_records.insert(op.as_record(self.executor.global_clock));
         });
 
@@ -623,7 +618,7 @@ impl Emulator for HarvardEmulator {
     ///
     /// # Returns
     /// if success, return a `BasicBlockEntry` starting at the current PC.
-    fn fetch_block(&mut self, pc: u32) -> Result<BasicBlockEntry> {
+    fn fetch_block(&mut self, pc: u32) -> Result<Rc<BasicBlockEntry>> {
         if let Some(start) = self.executor.basic_block_ref_cache.get(&pc) {
             return Ok(self.executor.basic_block_cache.get(start).unwrap().clone());
         }
@@ -633,8 +628,11 @@ impl Emulator for HarvardEmulator {
             Err(VMErrorKind::VMOutOfInstructions)?
         }
 
-        let entry = BasicBlockEntry::new(pc, block);
-        let _ = self.executor.basic_block_cache.insert(pc, entry.clone());
+        let entry = Rc::new(BasicBlockEntry::new(pc, block));
+        let _ = self
+            .executor
+            .basic_block_cache
+            .insert(pc, Rc::clone(&entry));
 
         self.executor
             .basic_block_ref_cache
@@ -677,7 +675,7 @@ impl Emulator for HarvardEmulator {
             );
         }
 
-        let public_input: Vec<MemoryInitializationEntry> = self
+        let input_memory: Vec<MemoryInitializationEntry> = self
             .input_memory
             .segment_bytes(0, None)
             .iter()
@@ -687,7 +685,7 @@ impl Emulator for HarvardEmulator {
                 value: *byte,
             })
             .collect();
-        let initial_rom_iter = self
+        let ro_initial_memory: Vec<MemoryInitializationEntry> = self
             .initial_rom_image
             .as_byte_slice()
             .iter()
@@ -695,8 +693,9 @@ impl Emulator for HarvardEmulator {
             .map(|(i, &byte)| MemoryInitializationEntry {
                 address: self.initial_rom_image.base() + i as u32,
                 value: byte,
-            });
-        let initial_ram_iter = self
+            })
+            .collect();
+        let rw_initial_memory: Vec<MemoryInitializationEntry> = self
             .initial_ram_image
             .as_byte_slice()
             .iter()
@@ -704,7 +703,8 @@ impl Emulator for HarvardEmulator {
             .map(|(i, &byte)| MemoryInitializationEntry {
                 address: self.initial_ram_image.base() + i as u32,
                 value: byte,
-            });
+            })
+            .collect();
 
         let debug_logs: Vec<Vec<u8>> = if self.get_executor().logs.is_some() {
             self.get_executor().logs.clone().unwrap()
@@ -712,18 +712,11 @@ impl Emulator for HarvardEmulator {
             Vec::new()
         };
 
-        let input_size =
-            initial_rom_iter.len() + self.initial_ram_image.len_bytes() + public_input.len();
+        let input_size = ro_initial_memory.len() + rw_initial_memory.len() + input_memory.len();
         let tracked_ram_size = self
             .memory_stats
             .get_tracked_ram_size(input_size as u32, output_memory.len() as u32)
             as usize;
-
-        let initial_memory: Vec<_> = initial_rom_iter
-            .into_iter()
-            .chain(initial_ram_iter)
-            .chain(public_input)
-            .collect();
 
         View {
             memory_layout: None,
@@ -741,7 +734,9 @@ impl Emulator for HarvardEmulator {
                     })
                     .collect(),
             },
-            initial_memory,
+            ro_initial_memory,
+            rw_initial_memory,
+            input_memory,
             tracked_ram_size,
             exit_code,
             output_memory,
@@ -815,6 +810,10 @@ impl LinearEmulator {
         let memory_layout = emulator_harvard
             .memory_stats
             .create_optimized_layout(
+                (
+                    emulator_harvard.initial_ram_image.base(),
+                    emulator_harvard.initial_ram_image.end(),
+                ),
                 (elf.instructions.len() * WORD_SIZE
                     + WORD_SIZE // padding for linker script spacing
                     + elf.rom_image.len_bytes()
@@ -1080,7 +1079,7 @@ impl Emulator for LinearEmulator {
     ///
     /// # Returns
     /// if success, return a `BasicBlockEntry` starting at the current PC.
-    fn fetch_block(&mut self, pc: u32) -> Result<BasicBlockEntry> {
+    fn fetch_block(&mut self, pc: u32) -> Result<Rc<BasicBlockEntry>> {
         if let Some(start) = self.executor.basic_block_ref_cache.get(&pc) {
             return Ok(self.executor.basic_block_cache.get(start).unwrap().clone());
         }
@@ -1094,7 +1093,7 @@ impl Emulator for LinearEmulator {
             Err(VMErrorKind::VMOutOfInstructions)?
         }
 
-        let entry = BasicBlockEntry::new(pc, block);
+        let entry = Rc::new(BasicBlockEntry::new(pc, block));
         let _ = self.executor.basic_block_cache.insert(pc, entry.clone());
 
         self.executor
@@ -1148,7 +1147,7 @@ impl Emulator for LinearEmulator {
 
         // Need to use dynamic dispatch due to Rust typing rules and not wanting to incur the cost
         // of doing a `collect()`.
-        let public_input_iter = self
+        let input_memory = self
             .memory
             .segment_words(
                 self.public_input_index,
@@ -1165,7 +1164,8 @@ impl Emulator for LinearEmulator {
                 word.into_iter().enumerate().map(move |(j, byte)| {
                     MemoryInitializationEntry::new(base_address + j as u32, byte)
                 })
-            });
+            })
+            .collect();
 
         let public_io_loc_iter = self
             .memory
@@ -1225,17 +1225,17 @@ impl Emulator for LinearEmulator {
             },
         };
         let ram_initialization = &self.initial_static_ram_image;
-        let ram_iter =
-            ram_initialization
-                .as_byte_slice()
-                .iter()
-                .enumerate()
-                .map(|(offset, byte)| {
-                    MemoryInitializationEntry::new(
-                        offset as u32 + self.initial_static_ram_image.base(),
-                        *byte,
-                    )
-                });
+        let rw_initial_memory = ram_initialization
+            .as_byte_slice()
+            .iter()
+            .enumerate()
+            .map(|(offset, byte)| {
+                MemoryInitializationEntry::new(
+                    offset as u32 + self.initial_static_ram_image.base(),
+                    *byte,
+                )
+            })
+            .collect();
 
         let debug_logs: Vec<Vec<u8>> = if self.get_executor().logs.is_some() {
             self.get_executor().logs.clone().unwrap()
@@ -1253,12 +1253,7 @@ impl Emulator for LinearEmulator {
             .unwrap_or_default()
             .to_vec();
 
-        let mut initial_memory: Vec<_> = public_io_loc_iter
-            .into_iter()
-            .chain(rom_iter)
-            .chain(ram_iter)
-            .collect();
-        initial_memory.extend(public_input_iter);
+        let ro_initial_memory: Vec<_> = public_io_loc_iter.into_iter().chain(rom_iter).collect();
 
         let tracked_ram_size = self
             .memory_layout
@@ -1287,7 +1282,9 @@ impl Emulator for LinearEmulator {
                     })
                     .collect(),
             },
-            initial_memory,
+            ro_initial_memory,
+            rw_initial_memory,
+            input_memory,
             tracked_ram_size,
             exit_code,
             output_memory,

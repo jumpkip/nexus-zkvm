@@ -9,7 +9,10 @@ use nexus_vm::error::Result;
 use postcard::from_bytes_cobs;
 use serde::{de::DeserializeOwned, Serialize};
 
-use std::{path::PathBuf, process::Command};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 use tempfile::{tempdir, TempDir};
 
 #[derive(Clone)]
@@ -86,7 +89,7 @@ pub fn parse_output<T: DeserializeOwned>(
             .expect("Failed to parse exit code"),
     );
 
-    if output.len() == 0 {
+    if output.is_empty() {
         Ok((exit_code, None))
     } else {
         // Deserialize the rest as the output.
@@ -131,7 +134,7 @@ pub fn setup_guest_project(runtime_path: &PathBuf) -> TempDir {
 }
 
 /// Setup project.
-pub fn write_guest_source_code(tmp_project_path: &PathBuf, test_path: &str) {
+pub fn write_guest_source_code(tmp_project_path: &Path, test_path: &str) {
     // Overwrite the main.rs file with the test file.
     let main_file = format!("{}/src/main.rs", tmp_project_path.to_str().unwrap());
 
@@ -162,7 +165,7 @@ pub fn compile_guest_project(
         .arg(target)
         .env(
             "RUSTFLAGS",
-            &format!(
+            format!(
                 "{compile_flags} -C relocation-model=pic -C panic=abort -C link-arg=-T{}",
                 linker_script.display()
             ),
@@ -223,7 +226,7 @@ pub fn emulate(
 ) -> (Vec<usize>, Vec<u8>, Vec<u8>) {
     let mut exit_code_bytes: Vec<u8> = Vec::new();
     let mut output_bytes: Vec<u8> = Vec::new();
-    let ad = vec![0u8; 0xbeef as usize]; // placeholder ad until we have use for it
+    let ad = vec![0u8; 0xbeef_usize]; // placeholder ad until we have use for it
     let mut cycles = Vec::new();
 
     for elf in elfs {
@@ -268,21 +271,13 @@ pub fn emulate(
                         .iter()
                         .map(|public_output_entry| public_output_entry.value)
                         .collect();
-                    let _output_log = if let Some(lines) = view.view_debug_logs() {
-                        lines
-                            .iter()
-                            .map(|line| String::from_utf8_lossy(line).to_string())
-                            .collect::<Vec<String>>()
-                            .join("\n")
-                    } else {
-                        "".into()
-                    };
                 }
                 cycles.push(cur_cycles);
             }
             EmulatorType::Linear(heap_size, stack_size, program_size) => {
                 // Construct the memory layout.
                 let memory_layout = LinearMemoryLayout::try_new(
+                    None,
                     heap_size,
                     stack_size,
                     public_input_bytes.len() as u32,
@@ -300,8 +295,8 @@ pub fn emulate(
                     &public_input_bytes,
                     &private_input_bytes,
                 );
-                cycles.push(emulator.executor.global_clock);
                 let _ = emulator.execute(false);
+                cycles.push(emulator.executor.global_clock);
 
                 let view = emulator.finalize();
                 exit_code_bytes = view

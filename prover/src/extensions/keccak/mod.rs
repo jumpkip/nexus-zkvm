@@ -52,18 +52,19 @@ mod tests {
     };
     use rand::{RngCore, SeedableRng};
     use rand_chacha::ChaCha12Rng;
-    use stwo_prover::{
-        constraint_framework::{
-            TraceLocationAllocator, ORIGINAL_TRACE_IDX, PREPROCESSED_TRACE_IDX,
-        },
+    use stwo::{
         core::{
-            air::ComponentProver,
-            backend::simd::{m31::LOG_N_LANES, SimdBackend},
-            channel::Blake2sChannel,
-            pcs::{CommitmentSchemeProver, PcsConfig},
-            poly::circle::{CanonicCoset, PolyOps},
+            channel::Blake2sChannel, pcs::PcsConfig, poly::circle::CanonicCoset,
             vcs::blake2_merkle::Blake2sMerkleChannel,
         },
+        prover::{
+            backend::simd::{m31::LOG_N_LANES, SimdBackend},
+            poly::circle::PolyOps,
+            CommitmentSchemeProver, ComponentProver,
+        },
+    };
+    use stwo_constraint_framework::{
+        TraceLocationAllocator, ORIGINAL_TRACE_IDX, PREPROCESSED_TRACE_IDX,
     };
 
     use super::keccak_extensions;
@@ -78,7 +79,13 @@ mod tests {
         let (view, _) = k_trace_direct(&basic_block, 1).expect("error generating trace");
         let program_trace_ref = ProgramTraceRef {
             program_memory: view.get_program_memory(),
-            init_memory: view.get_initial_memory(),
+            init_memory: &[
+                // preprocessed trace is sensitive to this ordering
+                view.get_ro_initial_memory(),
+                view.get_rw_initial_memory(),
+                view.get_public_input(),
+            ]
+            .concat(),
             exit_code: view.get_exit_code(),
             public_output: view.get_public_output(),
         };
@@ -172,7 +179,7 @@ mod tests {
             .collect();
         let components_ref: Vec<&dyn ComponentProver<SimdBackend>> =
             components.iter().map(|c| &**c).collect();
-        stwo_prover::core::prover::prove::<SimdBackend, Blake2sMerkleChannel>(
+        stwo::prover::prove::<SimdBackend, Blake2sMerkleChannel>(
             &components_ref,
             prover_channel,
             commitment_scheme,
@@ -216,7 +223,12 @@ mod tests {
             proof,
             view.get_program_memory(),
             &[],
-            view.get_initial_memory(),
+            &[
+                view.get_public_input(),
+                view.get_ro_initial_memory(),
+                view.get_rw_initial_memory(),
+            ]
+            .concat(),
             view.get_exit_code(),
             view.get_public_output(),
         )

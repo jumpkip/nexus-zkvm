@@ -1,12 +1,11 @@
 use std::marker::PhantomData;
 
 use num_traits::Zero;
-use stwo_prover::core::{
-    backend::simd::{column::BaseColumn, m31::LOG_N_LANES},
-    fields::m31::BaseField,
+use stwo::{
+    core::fields::m31::BaseField,
+    prover::backend::simd::{column::BaseColumn, m31::LOG_N_LANES},
 };
 
-use nexus_common::constants::WORD_SIZE;
 use nexus_vm_prover_air_column::AirColumn;
 
 use super::utils::{self, IntoBaseFields};
@@ -48,7 +47,7 @@ impl<C: AirColumn> TraceBuilder<C> {
     }
 
     /// Returns a copy of `N` raw columns in range `[offset..offset + N]` at `row`, where
-    /// `N` is assumed to be equal `Column::size` of a `col`.
+    /// `N` must equal `col.size()`.
     pub fn column<const N: usize>(&self, row: usize, col: C) -> [BaseField; N] {
         assert_eq!(col.size(), N, "column size mismatch");
 
@@ -58,7 +57,7 @@ impl<C: AirColumn> TraceBuilder<C> {
     }
 
     /// Returns mutable reference to `N` raw columns in range `[offset..offset + N]` at `row`,
-    /// where `N` is assumed to be equal `Column::size` of a `col`.
+    /// where `N` must equal `col.size()`.
     pub fn column_mut<const N: usize>(&mut self, row: usize, col: C) -> [&mut BaseField; N] {
         assert_eq!(col.size(), N, "column size mismatch");
 
@@ -69,7 +68,7 @@ impl<C: AirColumn> TraceBuilder<C> {
         })
     }
 
-    /// Fills four columns with u32 value.
+    /// Fills N columns with a value convertible into base fields.
     pub fn fill_columns<const N: usize, T: IntoBaseFields<N>>(
         &mut self,
         row: usize,
@@ -93,27 +92,6 @@ impl<C: AirColumn> TraceBuilder<C> {
         assert_eq!(col.size(), n, "column size mismatch");
         for (i, b) in value.iter().enumerate() {
             self.cols[col.offset() + i][row] = *b;
-        }
-    }
-
-    /// Fills columns with values from a byte slice, applying a selector.
-    ///
-    /// If the selector is true, fills the columns with values from the byte slice. Otherwise, fills with zeros.
-    pub fn fill_effective_columns(&mut self, row: usize, src: C, dst: C, selector: C) {
-        let src_len = src.size();
-        let dst_len = dst.size();
-        assert_eq!(src_len, dst_len, "column size mismatch");
-        let src: [_; WORD_SIZE] = self.column(row, src);
-        let [sel] = self.column(row, selector);
-        let dst: [_; WORD_SIZE] = self.column_mut(row, dst);
-        if sel.is_zero() {
-            for dst_limb in dst.into_iter() {
-                *dst_limb = BaseField::zero();
-            }
-        } else {
-            for i in 0..dst_len {
-                *dst[i] = src[i];
-            }
         }
     }
 
@@ -150,5 +128,14 @@ impl FinalizedTrace {
             cols: Vec::new(),
             log_size: 0,
         }
+    }
+
+    pub fn concat(self, mut other: Self) -> Self {
+        assert_eq!(self.log_size, other.log_size);
+
+        let Self { mut cols, log_size } = self;
+        cols.append(&mut other.cols);
+
+        Self { cols, log_size }
     }
 }

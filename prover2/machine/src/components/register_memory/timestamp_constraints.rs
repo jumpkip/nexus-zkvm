@@ -1,8 +1,11 @@
 use num_traits::One;
-use stwo_prover::{constraint_framework::EvalAtRow, core::fields::m31::BaseField};
+use stwo::core::fields::m31::BaseField;
+use stwo_constraint_framework::EvalAtRow;
 
 use nexus_vm::WORD_SIZE;
 use nexus_vm_prover_trace::{eval::TraceEval, preprocessed_trace_eval, trace_eval};
+
+use crate::lookups::RangeCheckLookupElements;
 
 use super::{
     columns::{Column, PreprocessedColumn},
@@ -13,6 +16,7 @@ impl RegisterMemory {
     pub(super) fn constrain_timestamps<E: EvalAtRow>(
         eval: &mut E,
         trace_eval: &TraceEval<PreprocessedColumn, Column, E>,
+        range_check: &RangeCheckLookupElements,
     ) {
         let is_local_pad = &trace_eval!(trace_eval, Column::IsLocalPad)[0];
 
@@ -36,6 +40,19 @@ impl RegisterMemory {
         let reg1_ts_prev_aux = trace_eval!(trace_eval, Column::Reg1TsPrevAux);
         let reg2_ts_prev_aux = trace_eval!(trace_eval, Column::Reg2TsPrevAux);
         let reg3_ts_prev_aux = trace_eval!(trace_eval, Column::Reg3TsPrevAux);
+
+        for timestamp_bytes in [
+            &reg1_ts_prev,
+            &reg2_ts_prev,
+            &reg3_ts_prev,
+            &reg1_ts_prev_aux,
+            &reg2_ts_prev_aux,
+            &reg3_ts_prev_aux,
+        ] {
+            range_check
+                .range256
+                .constrain(eval, is_local_pad.clone(), timestamp_bytes);
+        }
 
         RegisterMemory::constrain_diff_minus_one(
             eval,

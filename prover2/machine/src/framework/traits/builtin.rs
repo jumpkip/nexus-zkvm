@@ -1,19 +1,21 @@
-use stwo_prover::{
-    constraint_framework::EvalAtRow,
+use stwo::{
     core::{
-        backend::simd::SimdBackend,
         fields::{m31::BaseField, qm31::SecureField},
-        poly::{circle::CircleEvaluation, BitReversedOrder},
         ColumnVec,
     },
+    prover::{
+        backend::simd::SimdBackend,
+        poly::{circle::CircleEvaluation, BitReversedOrder},
+    },
 };
+use stwo_constraint_framework::EvalAtRow;
 
 use nexus_vm_prover_air_column::{AirColumn, PreprocessedAirColumn};
 use nexus_vm_prover_trace::{builder::FinalizedTrace, component::ComponentTrace, eval::TraceEval};
 
 use crate::{
     lookups::{AllLookupElements, ComponentLookupElements},
-    side_note::SideNote,
+    side_note::{program::ProgramTraceRef, SideNote},
 };
 
 pub trait BuiltInComponent {
@@ -29,7 +31,11 @@ pub trait BuiltInComponent {
     /// Lookups elements used by the component.
     type LookupElements: ComponentLookupElements;
 
-    fn generate_preprocessed_trace(&self, log_size: u32, side_note: &SideNote) -> FinalizedTrace;
+    fn generate_preprocessed_trace(
+        &self,
+        log_size: u32,
+        program: &ProgramTraceRef,
+    ) -> FinalizedTrace;
 
     fn generate_main_trace(&self, side_note: &mut SideNote) -> FinalizedTrace;
 

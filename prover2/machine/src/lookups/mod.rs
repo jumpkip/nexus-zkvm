@@ -4,26 +4,44 @@ use impl_trait_for_tuples::impl_for_tuples;
 
 mod logup_trace_builder;
 mod macros;
+mod range_check;
 mod relations;
 
 pub use self::{
     logup_trace_builder::LogupTraceBuilder,
+    range_check::{
+        Range128LookupElements, Range16LookupElements, Range256LookupElements,
+        Range32LookupElements, Range64LookupElements, Range8LookupElements,
+        RangeCheckLookupElements,
+    },
     relations::{
-        CpuToInstLookupElements, CpuToRegisterMemoryLookupElements, InstToRamLookupElements,
+        BitwiseInstrLookupElements, InstToProgMemoryLookupElements, InstToRamLookupElements,
         InstToRegisterMemoryLookupElements, ProgramExecutionLookupElements,
-        RamReadWriteLookupElements, RegisterMemoryLookupElements,
+        ProgramMemoryReadLookupElements, RamReadAddressLookupElements, RamReadWriteLookupElements,
+        RamUniqueAddrLookupElements, RamWriteAddressLookupElements, RegisterMemoryLookupElements,
     },
 };
+pub use range_check::RangeLookupBound;
 
 macros::register_relation! {
     enum RelationVariant {
-        CpuToInstLookupElements,
         ProgramExecutionLookupElements,
         RegisterMemoryLookupElements,
         InstToRegisterMemoryLookupElements,
-        CpuToRegisterMemoryLookupElements,
         InstToRamLookupElements,
-        RamReadWriteLookupElements
+        RamReadWriteLookupElements,
+        RamUniqueAddrLookupElements,
+        RamReadAddressLookupElements,
+        RamWriteAddressLookupElements,
+        ProgramMemoryReadLookupElements,
+        InstToProgMemoryLookupElements,
+        BitwiseInstrLookupElements,
+        Range8LookupElements,
+        Range16LookupElements,
+        Range32LookupElements,
+        Range64LookupElements,
+        Range128LookupElements,
+        Range256LookupElements,
     };
     pub(crate) trait RegisteredLookupBound {}
 }
@@ -53,7 +71,7 @@ pub(crate) trait ComponentLookupElements: private::Sealed {
 
     fn draw(
         lookup_elements: &mut AllLookupElements,
-        channel: &mut impl stwo_prover::core::channel::Channel,
+        channel: &mut impl stwo::core::channel::Channel,
     );
 }
 
@@ -69,7 +87,7 @@ impl<T: RegisteredLookupBound> ComponentLookupElements for T {
 
     fn draw(
         lookup_elements: &mut AllLookupElements,
-        channel: &mut impl stwo_prover::core::channel::Channel,
+        channel: &mut impl stwo::core::channel::Channel,
     ) {
         let type_id = TypeId::of::<Self>();
         lookup_elements
@@ -79,12 +97,10 @@ impl<T: RegisteredLookupBound> ComponentLookupElements for T {
     }
 }
 
-#[impl_for_tuples(5)]
-#[tuple_types_custom_trait_bound(RegisteredLookupBound)]
+#[impl_for_tuples(6)]
 impl private::Sealed for T {}
 
-#[impl_for_tuples(5)]
-#[tuple_types_custom_trait_bound(RegisteredLookupBound)]
+#[impl_for_tuples(6)]
 #[allow(clippy::unused_unit)]
 impl ComponentLookupElements for T {
     fn dummy() -> Self {
@@ -97,7 +113,7 @@ impl ComponentLookupElements for T {
 
     fn draw(
         lookup_elements: &mut AllLookupElements,
-        channel: &mut impl stwo_prover::core::channel::Channel,
+        channel: &mut impl stwo::core::channel::Channel,
     ) {
         for_tuples!( #( <T as ComponentLookupElements>::draw(lookup_elements, channel); )* );
     }

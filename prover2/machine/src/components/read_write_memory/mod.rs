@@ -1,13 +1,15 @@
 use num_traits::One;
-use stwo_prover::{
-    constraint_framework::{EvalAtRow, RelationEntry},
+use stwo::{
     core::{
-        backend::simd::{m31::PackedBaseField, SimdBackend},
         fields::{m31::BaseField, qm31::SecureField},
-        poly::{circle::CircleEvaluation, BitReversedOrder},
         ColumnVec,
     },
+    prover::{
+        backend::simd::{m31::PackedBaseField, SimdBackend},
+        poly::{circle::CircleEvaluation, BitReversedOrder},
+    },
 };
+use stwo_constraint_framework::{EvalAtRow, RelationEntry};
 
 use nexus_vm::WORD_SIZE;
 use nexus_vm_prover_trace::{
@@ -20,9 +22,9 @@ use crate::{
     framework::BuiltInComponent,
     lookups::{
         AllLookupElements, ComponentLookupElements, InstToRamLookupElements, LogupTraceBuilder,
-        RamReadWriteLookupElements,
+        RamReadWriteLookupElements, RangeCheckLookupElements,
     },
-    side_note::SideNote,
+    side_note::{program::ProgramTraceRef, SideNote},
 };
 
 mod ram_write_constraints;
@@ -31,7 +33,9 @@ mod timestamp_constraints;
 mod columns;
 mod trace;
 
-use columns::{Column, PreprocessedColumn, ShiftedBaseAddr};
+use columns::{Column, PreprocessedColumn};
+
+pub use columns::ShiftedBaseAddr;
 pub use trace::ReadWriteMemorySideNote;
 
 pub struct ReadWriteMemory;
@@ -41,9 +45,17 @@ impl BuiltInComponent for ReadWriteMemory {
 
     type MainColumn = Column;
 
-    type LookupElements = (RamReadWriteLookupElements, InstToRamLookupElements);
+    type LookupElements = (
+        RamReadWriteLookupElements,
+        InstToRamLookupElements,
+        RangeCheckLookupElements,
+    );
 
-    fn generate_preprocessed_trace(&self, _log_size: u32, _side_note: &SideNote) -> FinalizedTrace {
+    fn generate_preprocessed_trace(
+        &self,
+        _log_size: u32,
+        _program: &ProgramTraceRef,
+    ) -> FinalizedTrace {
         FinalizedTrace::empty()
     }
 
@@ -60,7 +72,8 @@ impl BuiltInComponent for ReadWriteMemory {
         ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
         SecureField,
     ) {
-        let (rel_ram_read_write, rel_inst_to_ram) = Self::LookupElements::get(lookup_elements);
+        let (rel_ram_read_write, rel_inst_to_ram, range_check) =
+            Self::LookupElements::get(lookup_elements);
         let mut logup_trace_builder = LogupTraceBuilder::new(component_trace.log_size());
 
         let [is_local_pad] = original_base_column!(component_trace, Column::IsLocalPad);
@@ -71,6 +84,42 @@ impl BuiltInComponent for ReadWriteMemory {
         let [ram2_val_cur] = original_base_column!(component_trace, Column::Ram2ValCur);
         let [ram3_val_cur] = original_base_column!(component_trace, Column::Ram3ValCur);
         let [ram4_val_cur] = original_base_column!(component_trace, Column::Ram4ValCur);
+
+        let [ram1_val_prev] = original_base_column!(component_trace, Column::Ram1ValPrev);
+        let [ram2_val_prev] = original_base_column!(component_trace, Column::Ram2ValPrev);
+        let [ram3_val_prev] = original_base_column!(component_trace, Column::Ram3ValPrev);
+        let [ram4_val_prev] = original_base_column!(component_trace, Column::Ram4ValPrev);
+
+        let ram1_ts_prev = original_base_column!(component_trace, Column::Ram1TsPrev);
+        let ram2_ts_prev = original_base_column!(component_trace, Column::Ram2TsPrev);
+        let ram3_ts_prev = original_base_column!(component_trace, Column::Ram3TsPrev);
+        let ram4_ts_prev = original_base_column!(component_trace, Column::Ram4TsPrev);
+        let ram1_ts_prev_aux = original_base_column!(component_trace, Column::Ram1TsPrevAux);
+        let ram2_ts_prev_aux = original_base_column!(component_trace, Column::Ram2TsPrevAux);
+        let ram3_ts_prev_aux = original_base_column!(component_trace, Column::Ram3TsPrevAux);
+        let ram4_ts_prev_aux = original_base_column!(component_trace, Column::Ram4TsPrevAux);
+
+        for timestamp_bytes in [
+            ram1_ts_prev,
+            ram1_ts_prev_aux,
+            ram2_ts_prev,
+            ram2_ts_prev_aux,
+            ram3_ts_prev,
+            ram3_ts_prev_aux,
+            ram4_ts_prev,
+            ram4_ts_prev_aux,
+        ] {
+            range_check.range256.generate_logup_col(
+                &mut logup_trace_builder,
+                is_local_pad.clone(),
+                &timestamp_bytes,
+            );
+        }
+        range_check.range256.generate_logup_col(
+            &mut logup_trace_builder,
+            is_local_pad.clone(),
+            &[ram1_val_prev, ram2_val_prev, ram3_val_prev, ram4_val_prev],
+        );
 
         let [ram1_accessed] = original_base_column!(component_trace, Column::Ram1Accessed);
         let [ram2_accessed] = original_base_column!(component_trace, Column::Ram2Accessed);
@@ -166,10 +215,10 @@ impl BuiltInComponent for ReadWriteMemory {
         trace_eval: TraceEval<Self::PreprocessedColumn, Self::MainColumn, E>,
         lookup_elements: &Self::LookupElements,
     ) {
-        ReadWriteMemory::constrain_timestamps(eval, &trace_eval);
-        ReadWriteMemory::constrain_ram_write(eval, &trace_eval);
+        let (rel_ram_read_write, rel_inst_to_ram, range_check) = lookup_elements;
 
-        let (rel_ram_read_write, rel_inst_to_ram) = lookup_elements;
+        ReadWriteMemory::constrain_timestamps(eval, &trace_eval, range_check);
+        ReadWriteMemory::constrain_ram_write(eval, &trace_eval, range_check);
 
         let [is_local_pad] = trace_eval!(trace_eval, Column::IsLocalPad);
         let clk = trace_eval!(trace_eval, Column::Clk);
@@ -341,6 +390,7 @@ impl ReadWriteMemory {
         let [ram_val_prev] = component_trace.original_base_column(ram_val_prev);
 
         let ram_base_addr_0 = ShiftedBaseAddr {
+            column: Column::RamBaseAddr,
             offset: address_offset,
         };
         let ram_base_addr_0 = ram_base_addr_0.combine_from_finalized_trace(component_trace);
@@ -385,6 +435,7 @@ impl ReadWriteMemory {
         let [ram_val_cur] = component_trace.original_base_column(ram_val_cur);
 
         let ram_base_addr_0 = ShiftedBaseAddr {
+            column: Column::RamBaseAddr,
             offset: address_offset,
         };
         let ram_base_addr_0 = ram_base_addr_0.combine_from_finalized_trace(component_trace);
@@ -406,16 +457,19 @@ impl ReadWriteMemory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use nexus_vm::{
         riscv::{BasicBlock, BuiltinOpcode, Instruction, Opcode},
         trace::k_trace_direct,
     };
-    use num_traits::Zero;
-    use stwo_prover::{constraint_framework::Relation, core::fields::FieldExpOps};
+    use stwo::core::fields::{m31::BaseField, FieldExpOps};
+    use stwo_constraint_framework::Relation;
 
     use crate::{
-        components::read_write_memory_boundary::ReadWriteMemoryBoundary,
+        components::{read_write_memory_boundary::PrivateMemoryBoundary, RANGE256},
         framework::test_utils::{assert_component, components_claimed_sum, AssertContext},
+        lookups::RamWriteAddressLookupElements,
+        verify::verify_logup_sum,
     };
 
     #[test]
@@ -440,9 +494,8 @@ mod tests {
         let assert_ctx = &mut AssertContext::new(&program_trace, &view);
         let mut claimed_sum = assert_component(ReadWriteMemory, assert_ctx);
 
-        claimed_sum += components_claimed_sum(&[&ReadWriteMemoryBoundary], assert_ctx);
-
-        // manually add a fraction from the store component since it's not implemented yet
+        claimed_sum += components_claimed_sum(&[&PrivateMemoryBoundary, &RANGE256], assert_ctx);
+        // manually add a fraction from the store component to skip registers and cpu
         //
         // (
         //     clk,
@@ -469,6 +522,20 @@ mod tests {
             &m31_tuple,
         )
         .inverse();
-        assert!(claimed_sum.is_zero());
+
+        // add address to the write set
+        let rel_write_addrs: &RamWriteAddressLookupElements = assert_ctx.lookup_elements.as_ref();
+        let addr_tuple: Vec<BaseField> = (0x80008u32 - 0x80000u32)
+            .to_le_bytes()
+            .into_iter()
+            .map(|byte| BaseField::from(byte as u32))
+            .collect();
+        claimed_sum +=
+            <RamWriteAddressLookupElements as Relation<BaseField, SecureField>>::combine(
+                rel_write_addrs,
+                &addr_tuple,
+            )
+            .inverse();
+        verify_logup_sum(&[claimed_sum], &view, &assert_ctx.lookup_elements).unwrap();
     }
 }

@@ -1,20 +1,21 @@
 //! Erased dyn-compatible version of the [`BuiltInComponent`] trait.
 
-use stwo_prover::{
-    constraint_framework::{FrameworkEval, InfoEvaluator, TraceLocationAllocator},
+use stwo::{
     core::{
-        air::{Component, ComponentProver},
-        backend::simd::SimdBackend,
+        air::Component,
         channel::Blake2sChannel,
         fields::{m31::BaseField, qm31::SecureField},
         pcs::TreeVec,
-        poly::{
-            circle::{CanonicCoset, CircleEvaluation},
-            BitReversedOrder,
-        },
+        poly::circle::CanonicCoset,
         ColumnVec,
     },
+    prover::{
+        backend::simd::SimdBackend,
+        poly::{circle::CircleEvaluation, BitReversedOrder},
+        ComponentProver,
+    },
 };
+use stwo_constraint_framework::{FrameworkEval, InfoEvaluator, TraceLocationAllocator};
 
 use nexus_vm_prover_air_column::AirColumn;
 use nexus_vm_prover_trace::component::ComponentTrace;
@@ -23,10 +24,9 @@ use super::builtin::BuiltInComponent;
 use crate::{
     framework::eval::{BuiltInComponentEval, FrameworkComponent},
     lookups::{AllLookupElements, ComponentLookupElements},
-    side_note::SideNote,
+    side_note::{program::ProgramTraceRef, SideNote},
 };
 
-#[allow(unused)] // TODO: remove with introduction of the first lookup relation
 pub trait MachineComponent {
     /// Returns the log size of the evaluation domain.
     fn max_constraint_log_degree_bound(&self, log_size: u32) -> u32;
@@ -50,7 +50,7 @@ pub trait MachineComponent {
     fn generate_preprocessed_trace(
         &self,
         log_size: u32,
-        side_note: &SideNote,
+        program: &ProgramTraceRef,
     ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>;
 
     fn generate_component_trace(&self, side_note: &mut SideNote) -> ComponentTrace;
@@ -118,10 +118,10 @@ where
     fn generate_preprocessed_trace(
         &self,
         log_size: u32,
-        side_note: &SideNote,
+        program: &ProgramTraceRef,
     ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
         let preprocessed_columns =
-            <C as BuiltInComponent>::generate_preprocessed_trace(self, log_size, side_note);
+            <C as BuiltInComponent>::generate_preprocessed_trace(self, log_size, program);
         let domain = CanonicCoset::new(log_size).circle_domain();
         preprocessed_columns
             .cols
@@ -134,8 +134,11 @@ where
         let original_trace = <C as BuiltInComponent>::generate_main_trace(self, side_note);
 
         let log_size = original_trace.log_size;
-        let preprocessed_trace =
-            <C as BuiltInComponent>::generate_preprocessed_trace(self, log_size, side_note);
+        let preprocessed_trace = <C as BuiltInComponent>::generate_preprocessed_trace(
+            self,
+            log_size,
+            &side_note.program,
+        );
 
         ComponentTrace {
             log_size,

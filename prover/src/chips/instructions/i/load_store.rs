@@ -1,13 +1,12 @@
+use num_traits::One;
+use stwo::{
+    core::fields::m31::BaseField,
+    prover::backend::simd::m31::{PackedBaseField, LOG_N_LANES},
+};
+use stwo_constraint_framework::{EvalAtRow, LogupTraceGenerator, Relation, RelationEntry};
+
 use nexus_common::constants::WORD_SIZE_HALVED;
 use nexus_vm::{memory::MemAccessSize, riscv::BuiltinOpcode, WORD_SIZE};
-use num_traits::One;
-use stwo_prover::{
-    constraint_framework::{logup::LogupTraceGenerator, EvalAtRow, Relation, RelationEntry},
-    core::{
-        backend::simd::m31::{PackedBaseField, LOG_N_LANES},
-        fields::m31::BaseField,
-    },
-};
 
 use crate::{
     chips::memory_check::decr_subtract_with_borrow,
@@ -65,12 +64,12 @@ impl VirtualColumnForSum for Ram3_4Accessed {
 pub struct LoadStoreChip;
 
 const LOOKUP_TUPLE_SIZE: usize = 2 * WORD_SIZE_HALVED + 1;
-stwo_prover::relation!(LoadStoreLookupElements, LOOKUP_TUPLE_SIZE);
+stwo_constraint_framework::relation!(LoadStoreLookupElements, LOOKUP_TUPLE_SIZE);
 
 impl MachineChip for LoadStoreChip {
     fn draw_lookup_elements(
         all_elements: &mut AllLookupElements,
-        channel: &mut impl stwo_prover::core::channel::Channel,
+        channel: &mut impl stwo::core::channel::Channel,
         _config: &ExtensionsConfig,
     ) {
         all_elements.insert(LoadStoreLookupElements::draw(channel));
@@ -125,11 +124,6 @@ impl MachineChip for LoadStoreChip {
         traces.fill_columns(row_idx, carry_bits, Column::CarryFlag);
         let clk = row_idx as u32 + 1;
         for memory_record in vm_step.step.memory_records.iter() {
-            assert_eq!(
-                memory_record.get_timestamp(),
-                (row_idx as u32 + 1),
-                "timestamp mismatch"
-            );
             assert_eq!(memory_record.get_timestamp(), clk, "timestamp mismatch");
             let byte_address = memory_record.get_address();
             assert_eq!(
@@ -292,7 +286,7 @@ impl MachineChip for LoadStoreChip {
         );
     }
 
-    fn add_constraints<E: stwo_prover::constraint_framework::EvalAtRow>(
+    fn add_constraints<E: EvalAtRow>(
         eval: &mut E,
         trace_eval: &crate::trace::eval::TraceEval<E>,
         lookup_elements: &AllLookupElements,
@@ -934,7 +928,7 @@ mod test {
         riscv::{BasicBlock, BuiltinOpcode, Instruction, Opcode},
         trace::k_trace_direct,
     };
-    use stwo_prover::core::prover::ProvingError;
+    use stwo::prover::ProvingError;
 
     const LOG_SIZE: u32 = PreprocessedTraces::MIN_LOG_SIZE;
 
@@ -1072,7 +1066,13 @@ mod test {
             proof,
             view.get_program_memory(),
             view.view_associated_data().as_deref().unwrap_or_default(),
-            view.get_initial_memory(),
+            &[
+                // preprocessed trace is sensitive to this ordering
+                view.get_ro_initial_memory(),
+                view.get_rw_initial_memory(),
+                view.get_public_input(),
+            ]
+            .concat(),
             view.get_exit_code(),
             view.get_public_output(),
         )

@@ -19,7 +19,7 @@ use nexus_vm_prover::{
 };
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use stwo_prover::core::channel::Blake2sChannel;
+use stwo::core::channel::Blake2sChannel;
 
 const K: usize = 1;
 
@@ -66,7 +66,13 @@ fn bench_trace_gen(c: &mut Criterion) {
         let preprocessed_trace = PreprocessedTraces::new(log_size);
         let program_trace_ref = ProgramTraceRef {
             program_memory: program_info,
-            init_memory: view.get_initial_memory(),
+            init_memory: &[
+                // preprocessed trace is sensitive to this ordering
+                view.get_ro_initial_memory(),
+                view.get_rw_initial_memory(),
+                view.get_public_input(),
+            ]
+            .concat(),
             exit_code: view.get_exit_code(),
             public_output: view.get_public_output(),
         };
@@ -163,7 +169,7 @@ fn program_trace(log_size: u32) -> Vec<BasicBlock> {
         k = (k + 1) % NUM_REGISTERS;
         Some(inst)
     }))
-    .take(2usize.pow(log_size))
+    .take(1 << log_size)
     .collect();
     vec![BasicBlock::new(insts)]
 }

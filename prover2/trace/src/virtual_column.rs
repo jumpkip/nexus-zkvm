@@ -1,16 +1,14 @@
 use num_traits::Zero;
-use stwo_prover::{
-    constraint_framework::EvalAtRow,
-    core::backend::{
-        simd::{
-            column::BaseColumn,
-            m31::{PackedBaseField, LOG_N_LANES},
-        },
-        Column,
+use stwo::prover::backend::{
+    simd::{
+        column::BaseColumn,
+        m31::{PackedBaseField, LOG_N_LANES},
     },
+    Column,
 };
 
 use nexus_vm_prover_air_column::{AirColumn, PreprocessedAirColumn};
+use stwo_constraint_framework::EvalAtRow;
 
 use crate::{
     component::{ComponentTrace, FinalizedColumn},
@@ -30,7 +28,10 @@ pub trait VirtualColumn {
 
     fn combine_at_row(&self, component_trace: &ComponentTrace, vec_idx: usize) -> PackedBaseField;
 
-    fn combine_from_finalized_trace(&self, component_trace: &ComponentTrace) -> FinalizedColumn {
+    fn combine_from_finalized_trace<'a>(
+        &self,
+        component_trace: &'a ComponentTrace,
+    ) -> FinalizedColumn<'a> {
         let log_size = component_trace.log_size();
         let mut column = BaseColumn::zeros(1 << log_size);
 

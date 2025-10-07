@@ -2,13 +2,11 @@ use nexus_common::constants::WORD_SIZE_HALVED;
 use num_traits::{One, Zero};
 
 use nexus_vm::WORD_SIZE;
-use stwo_prover::{
-    constraint_framework::{logup::LogupTraceGenerator, EvalAtRow, Relation, RelationEntry},
-    core::{
-        backend::simd::m31::{PackedBaseField, LOG_N_LANES},
-        fields::m31::BaseField,
-    },
+use stwo::{
+    core::fields::m31::BaseField,
+    prover::backend::simd::m31::{PackedBaseField, LOG_N_LANES},
 };
+use stwo_constraint_framework::{EvalAtRow, LogupTraceGenerator, Relation, RelationEntry};
 
 use crate::{
     column::{Column, PreprocessedColumn, ProgramColumn},
@@ -29,13 +27,13 @@ use crate::{
 /// ProgMemCheckChip needs to be located after CpuChip
 pub struct ProgramMemCheckChip;
 
-const LOOKUP_TUPLE_SIZE: usize = 3 * WORD_SIZE;
-stwo_prover::relation!(ProgramCheckLookupElements, LOOKUP_TUPLE_SIZE);
+const LOOKUP_TUPLE_SIZE: usize = 2 * WORD_SIZE_HALVED + WORD_SIZE;
+stwo_constraint_framework::relation!(ProgramCheckLookupElements, LOOKUP_TUPLE_SIZE);
 
 impl MachineChip for ProgramMemCheckChip {
     fn draw_lookup_elements(
         all_elements: &mut AllLookupElements,
-        channel: &mut impl stwo_prover::core::channel::Channel,
+        channel: &mut impl stwo::core::channel::Channel,
         _config: &ExtensionsConfig,
     ) {
         all_elements.insert(ProgramCheckLookupElements::draw(channel));
@@ -253,7 +251,7 @@ impl ProgramMemCheckChip {
             }
             // Initial counter is zero
             tuple.extend_from_slice(&[PackedBaseField::zero(); WORD_SIZE]);
-            assert_eq!(tuple.len(), WORD_SIZE_HALVED + WORD_SIZE_HALVED + WORD_SIZE);
+            assert_eq!(tuple.len(), LOOKUP_TUPLE_SIZE);
             let numerator = prg_memory_flag.data[vec_row];
             logup_col_gen.write_frac(
                 vec_row,
@@ -289,7 +287,7 @@ impl ProgramMemCheckChip {
         for _ in 0..WORD_SIZE {
             tuple.extend_from_slice(&[E::F::zero()]);
         }
-        assert_eq!(tuple.len(), WORD_SIZE_HALVED + WORD_SIZE_HALVED + WORD_SIZE);
+        assert_eq!(tuple.len(), LOOKUP_TUPLE_SIZE);
         let numerator = prg_memory_flag;
 
         eval.add_to_relation(RelationEntry::new(
@@ -337,7 +335,7 @@ impl ProgramMemCheckChip {
             for prg_memory_ctr_byte in prg_memory_ctr.iter() {
                 tuple.push(prg_memory_ctr_byte.data[vec_row]);
             }
-            assert_eq!(tuple.len(), 2 * WORD_SIZE_HALVED + WORD_SIZE);
+            assert_eq!(tuple.len(), LOOKUP_TUPLE_SIZE);
             let numerator = prg_memory_flag.data[vec_row];
             logup_col_gen.write_frac(
                 vec_row,
@@ -374,7 +372,7 @@ impl ProgramMemCheckChip {
         for prg_memory_ctr_byte in prg_memory_ctr.into_iter() {
             tuple.push(prg_memory_ctr_byte);
         }
-        assert_eq!(tuple.len(), 2 * WORD_SIZE_HALVED + WORD_SIZE);
+        assert_eq!(tuple.len(), LOOKUP_TUPLE_SIZE);
         let numerator = prg_memory_flag;
         eval.add_to_relation(RelationEntry::new(
             lookup_elements,
@@ -415,7 +413,7 @@ impl ProgramMemCheckChip {
             for prg_prev_ctr_byte in prg_prev_ctr.iter() {
                 tuple.push(prg_prev_ctr_byte.data[vec_row]);
             }
-            assert_eq!(tuple.len(), 2 * WORD_SIZE_HALVED + WORD_SIZE);
+            assert_eq!(tuple.len(), LOOKUP_TUPLE_SIZE);
             let numerator = PackedBaseField::one() - is_padding.data[vec_row];
             logup_col_gen.write_frac(
                 vec_row,
@@ -451,7 +449,7 @@ impl ProgramMemCheckChip {
         for prg_prev_ctr_byte in prg_prev_ctr.into_iter() {
             tuple.push(prg_prev_ctr_byte);
         }
-        assert_eq!(tuple.len(), 2 * WORD_SIZE_HALVED + WORD_SIZE);
+        assert_eq!(tuple.len(), LOOKUP_TUPLE_SIZE);
         let numerator = E::F::one() - is_padding;
 
         eval.add_to_relation(RelationEntry::new(
@@ -493,7 +491,7 @@ impl ProgramMemCheckChip {
             for prg_prev_ctr_byte in prg_cur_ctr.iter() {
                 tuple.push(prg_prev_ctr_byte.data[vec_row]);
             }
-            assert_eq!(tuple.len(), 2 * WORD_SIZE_HALVED + WORD_SIZE);
+            assert_eq!(tuple.len(), LOOKUP_TUPLE_SIZE);
             let numerator = PackedBaseField::one() - is_padding.data[vec_row];
             logup_col_gen.write_frac(
                 vec_row,
@@ -529,7 +527,7 @@ impl ProgramMemCheckChip {
         for prg_prev_ctr_byte in prg_cur_ctr.into_iter() {
             tuple.push(prg_prev_ctr_byte);
         }
-        assert_eq!(tuple.len(), 2 * WORD_SIZE_HALVED + WORD_SIZE);
+        assert_eq!(tuple.len(), LOOKUP_TUPLE_SIZE);
         let numerator = E::F::one() - is_padding;
         eval.add_to_relation(RelationEntry::new(
             lookup_elements,

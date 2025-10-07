@@ -1,7 +1,7 @@
-use num_traits::{One, Zero};
-use stwo_prover::core::{
-    backend::simd::{column::BaseColumn, m31::LOG_N_LANES},
-    fields::m31::BaseField,
+use num_traits::One;
+use stwo::{
+    core::fields::m31::BaseField,
+    prover::backend::simd::{column::BaseColumn, m31::LOG_N_LANES},
 };
 
 use nexus_common::riscv::register::NUM_REGISTERS;
@@ -15,7 +15,10 @@ use nexus_vm_prover_trace::{
 };
 
 use super::columns::Column;
-use crate::{components::utils::decr_subtract_with_borrow, side_note::SideNote};
+use crate::{
+    components::utils::decr_subtract_with_borrow,
+    side_note::{range_check::RangeCheckAccumulator, SideNote},
+};
 
 // Register memory side note can only be updated by the register memory component, once it's stored
 // in the prover's side note it can only be used to fetch final registers state.
@@ -65,20 +68,27 @@ pub fn preprocessed_timestamp_trace(log_size: u32, shift: u32) -> Vec<BaseColumn
 
 pub fn generate_main_trace(side_note: &mut SideNote) -> FinalizedTrace {
     // Main routine for generating register-memory trace.
-
-    assert_initial_state(side_note.register_memory());
     let num_steps = side_note.num_program_steps();
     let log_size = num_steps.next_power_of_two().ilog2().max(LOG_N_LANES);
 
     let mut trace = TraceBuilder::new(log_size);
     let mut reg_mem_side_note = RegisterMemorySideNote::default();
+    let mut range_check_accum = RangeCheckAccumulator::default();
 
     for (row_idx, program_step) in side_note.iter_program_steps().enumerate() {
-        generate_trace_row(&mut trace, row_idx, program_step, &mut reg_mem_side_note);
+        generate_trace_row(
+            &mut trace,
+            row_idx,
+            program_step,
+            &mut reg_mem_side_note,
+            &mut range_check_accum,
+        );
     }
 
     // store final register state into side note
-    *side_note.register_memory_mut() = reg_mem_side_note;
+    side_note.memory.register_memory = reg_mem_side_note;
+    // update range check accumulator
+    side_note.range_check.append(range_check_accum);
 
     for row_idx in num_steps..1 << log_size {
         trace.fill_columns(row_idx, true, Column::IsLocalPad);
@@ -90,23 +100,6 @@ pub fn generate_main_trace(side_note: &mut SideNote) -> FinalizedTrace {
         );
     }
     trace.finalize()
-}
-
-fn assert_initial_state(register_mem_side_note: &RegisterMemorySideNote) {
-    assert!(
-        register_mem_side_note
-            .last_access_timestamp
-            .iter()
-            .all(Zero::is_zero),
-        "register memory initial timestamps are invalid"
-    );
-    assert!(
-        register_mem_side_note
-            .last_access_value
-            .iter()
-            .all(Zero::is_zero),
-        "register memory initial values are invalid"
-    );
 }
 
 fn reg1_accessed(step: ProgramStep) -> bool {
@@ -122,18 +115,20 @@ fn reg2_accessed(step: ProgramStep) -> bool {
 }
 
 fn reg3_accessed(step: ProgramStep) -> bool {
-    let opcode = &step.step.instruction.opcode;
-
-    // TODO: handle syscalls
-    assert!(
-        !matches!(
-            opcode.builtin(),
-            Some(BuiltinOpcode::ECALL) | Some(BuiltinOpcode::EBREAK)
-        ),
-        "register memory doesn't support syscalls"
-    );
+    if let Some(syscall_code) = step.get_syscall_code() {
+        return ProgramStep::syscall_accessed_reg3(syscall_code);
+    }
 
     true
+}
+
+fn reg3_write(step: ProgramStep) -> bool {
+    let instr = &step.step.instruction;
+
+    !matches!(
+        instr.ins_type,
+        InstructionType::SType | InstructionType::BType
+    )
 }
 
 fn generate_trace_row(
@@ -141,6 +136,7 @@ fn generate_trace_row(
     row_idx: usize,
     program_step: ProgramStep,
     reg_mem_side_note: &mut RegisterMemorySideNote,
+    range_check_accum: &mut RangeCheckAccumulator,
 ) {
     let opcode = &program_step.step.instruction.opcode;
     assert!(opcode.is_builtin(), "custom instructions are unsupported");
@@ -158,37 +154,15 @@ fn generate_trace_row(
     let reg2_addr = program_step.get_op_c();
     let reg3_addr = program_step.get_op_a() as u8;
 
-    let (reg1_prev_ts, reg2_prev_ts, reg3_prev_ts) = {
-        (
-            if reg1_accessed {
-                reg_mem_side_note.last_access_timestamp[reg1_addr as usize]
-            } else {
-                0
-            },
-            if reg2_accessed {
-                reg_mem_side_note.last_access_timestamp[reg2_addr as usize]
-            } else {
-                0
-            },
-            if reg3_accessed {
-                reg_mem_side_note.last_access_timestamp[reg3_addr as usize]
-            } else {
-                0
-            },
-        )
-    };
-
     let reg1_value = program_step.get_value_b();
     let reg2_value = if program_step.step.instruction.ins_type == InstructionType::UType {
         (program_step.step.instruction.op_c << 12).to_le_bytes()
     } else {
         program_step.get_value_c().0
     };
-    let reg3_value = program_step
-        .get_result()
-        .expect("instructions with no output are unsupported");
+    let reg3_value = program_step.get_reg3_result_value();
 
-    let reg3_value_effective_flag = program_step.value_a_effectitve_flag();
+    let reg3_value_effective_flag = program_step.value_a_effective_flag();
     let (reg3_value_effective_flag_aux, reg3_value_effective_flag_aux_inv): (BaseField, u8) = {
         if reg3_value_effective_flag {
             (BaseField::from(reg3_addr as u32).inverse(), reg3_addr)
@@ -218,7 +192,7 @@ fn generate_trace_row(
         Column::Reg3ValEffectiveFlagAuxInv,
     );
 
-    if reg1_accessed {
+    let reg1_prev_ts = if reg1_accessed {
         generate_prev_access(
             trace,
             row_idx,
@@ -227,9 +201,12 @@ fn generate_trace_row(
             reg_mem_side_note,
             reg1_cur_ts,
             Column::Reg1TsPrev,
-        );
-    }
-    if reg2_accessed {
+        )
+        .1
+    } else {
+        0
+    };
+    let reg2_prev_ts = if reg2_accessed {
         let reg2_addr = u8::try_from(reg2_addr).expect("invalid value of reg2-addr");
         generate_prev_access(
             trace,
@@ -239,10 +216,13 @@ fn generate_trace_row(
             reg_mem_side_note,
             reg2_cur_ts,
             Column::Reg2TsPrev,
-        );
-    }
-    if reg3_accessed {
-        let (reg3_prev_value, _reg3_prev_ts) = generate_prev_access(
+        )
+        .1
+    } else {
+        0
+    };
+    let reg3_prev_ts = if reg3_accessed {
+        let (reg3_prev_value, reg3_prev_ts) = generate_prev_access(
             trace,
             row_idx,
             reg3_addr,
@@ -254,21 +234,25 @@ fn generate_trace_row(
 
         // write reg3 previous value
         trace.fill_columns(row_idx, reg3_prev_value, Column::Reg3ValPrev);
-        trace.fill_columns(
-            row_idx,
-            true, // syscalls may access reg3 without write
-            Column::Reg3Write,
-        );
+        trace.fill_columns(row_idx, reg3_write(program_step), Column::Reg3Write);
+        reg3_prev_ts
+    } else {
+        0
+    };
+
+    if reg1_accessed {
+        trace.fill_columns(row_idx, reg1_addr, Column::Reg1Addr);
+        trace.fill_columns(row_idx, reg1_value, Column::Reg1Val);
     }
-
-    trace.fill_columns(row_idx, reg1_addr, Column::Reg1Addr);
-    trace.fill_columns(row_idx, BaseField::from(reg2_addr), Column::Reg2Addr);
-    trace.fill_columns(row_idx, reg3_addr, Column::Reg3Addr);
-
-    trace.fill_columns(row_idx, reg1_value, Column::Reg1Val);
-    trace.fill_columns(row_idx, reg2_value, Column::Reg2Val);
-    trace.fill_columns(row_idx, reg3_value, Column::Reg3Val);
-    trace.fill_columns(row_idx, reg3_value_cur, Column::Reg3ValCur);
+    if reg2_accessed {
+        trace.fill_columns(row_idx, BaseField::from(reg2_addr), Column::Reg2Addr);
+        trace.fill_columns(row_idx, reg2_value, Column::Reg2Val);
+    }
+    if reg3_accessed {
+        trace.fill_columns(row_idx, reg3_addr, Column::Reg3Addr);
+        trace.fill_columns(row_idx, reg3_value, Column::Reg3Val);
+        trace.fill_columns(row_idx, reg3_value_cur, Column::Reg3ValCur);
+    }
 
     trace.fill_columns(row_idx, reg1_accessed, Column::Reg1Accessed);
     trace.fill_columns(row_idx, reg2_accessed, Column::Reg2Accessed);
@@ -291,6 +275,28 @@ fn generate_trace_row(
     trace.fill_columns(row_idx, h1_aux_borrow[1], Column::H1AuxBorrow);
     trace.fill_columns(row_idx, h2_aux_borrow[1], Column::H2AuxBorrow);
     trace.fill_columns(row_idx, h3_aux_borrow[1], Column::H3AuxBorrow);
+
+    range_check_accum
+        .range256
+        .add_values(&reg1_prev_ts.to_le_bytes());
+    range_check_accum
+        .range256
+        .add_values(&reg2_prev_ts.to_le_bytes());
+    range_check_accum
+        .range256
+        .add_values(&reg3_prev_ts.to_le_bytes());
+    range_check_accum.range256.add_values(&reg1_ts_prev_aux);
+    range_check_accum.range256.add_values(&reg2_ts_prev_aux);
+    range_check_accum.range256.add_values(&reg3_ts_prev_aux);
+
+    let range_checked_reg3_val = if reg3_accessed {
+        &reg3_value
+    } else {
+        &[0; WORD_SIZE]
+    };
+    range_check_accum
+        .range256
+        .add_values(range_checked_reg3_val);
 }
 
 fn generate_prev_access(

@@ -1,18 +1,14 @@
 use std::rc::Rc;
 
 use nexus_vm_prover_air_column::{AirColumn, PreprocessedAirColumn};
-use stwo_prover::{
-    constraint_framework::{ORIGINAL_TRACE_IDX, PREPROCESSED_TRACE_IDX},
-    core::{
+use stwo::{
+    core::{fields::m31::BaseField, poly::circle::CanonicCoset, ColumnVec},
+    prover::{
         backend::simd::{column::BaseColumn, m31::PackedBaseField, SimdBackend},
-        fields::m31::BaseField,
-        poly::{
-            circle::{CanonicCoset, CircleEvaluation},
-            BitReversedOrder,
-        },
-        ColumnVec,
+        poly::{circle::CircleEvaluation, BitReversedOrder},
     },
 };
+use stwo_constraint_framework::{ORIGINAL_TRACE_IDX, PREPROCESSED_TRACE_IDX};
 
 /// Reference to a finalized column in a SIMD representation, or a constant.
 #[derive(Debug, Clone)]
@@ -86,11 +82,6 @@ impl ComponentTrace {
         &'a self,
         col: C,
     ) -> [FinalizedColumn<'a>; N] {
-        assert_eq!(
-            self.original_trace.len(),
-            C::COLUMNS_NUM,
-            "original trace length mismatch"
-        );
         assert_eq!(col.size(), N, "column size mismatch");
 
         let offset = col.offset();

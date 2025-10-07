@@ -10,11 +10,10 @@ use crate::{
         IsMulh, IsMulhsu, IsMulhu, IsOr, IsOverflow, IsPadding, IsRem, IsRemu, IsSb, IsSh, IsSll,
         IsSlt, IsSltu, IsSra, IsSrl, IsSub, IsSw, IsSysCycleCount, IsSysDebug, IsSysHalt,
         IsSysHeapReset, IsSysPrivInput, IsSysStackReset, IsXor, LtFlag, MulC1, MulC3Prime,
-        MulC3PrimePrime, MulC5, MulCarry0, MulCarry1_0, MulCarry1_1, MulCarry2_0, MulCarry2_1,
-        MulCarry3, OpA0, OpB0, OpB4, OpC0, OpC11, OpC12, OpC20, OpC4, PcCarry, ProgCtrCarry,
-        RemAux, RemainderBorrow, SgnA, SgnB, SgnC, ShiftBit1, ShiftBit2, ShiftBit3, ShiftBit4,
-        ShiftBit5, ValueAAbsBorrow, ValueAAbsBorrowHigh, ValueAEffectiveFlag, ValueBAbsBorrow,
-        ValueCAbsBorrow,
+        MulC3PrimePrime, MulC5, MulCarry0, MulCarry2_0, MulCarry2_1, MulCarry3, OpA0, OpB0, OpB4,
+        OpC0, OpC11, OpC12, OpC20, OpC4, PcCarry, ProgCtrCarry, RemAux, RemainderBorrow, SgnA,
+        SgnB, SgnC, ShiftBit1, ShiftBit2, ShiftBit3, ShiftBit4, ShiftBit5, ValueAAbsBorrow,
+        ValueAAbsBorrowHigh, ValueAEffectiveFlag, ValueBAbsBorrow, ValueCAbsBorrow,
     },
     components::AllLookupElements,
     extensions::ExtensionsConfig,
@@ -100,13 +99,11 @@ const CHECKED_HALF_WORD: [Column; 11] = [
     ValueCAbsBorrow,
     ValueAAbsBorrowHigh,
 ];
-const TYPE_R_CHECKED_SINGLE: [Column; 18] = [
+const TYPE_R_CHECKED_SINGLE: [Column; 16] = [
     OpC4,
     OpA0,
     OpB0,
     MulCarry0,
-    MulCarry1_0,
-    MulCarry1_1,
     MulCarry2_0,
     MulCarry2_1,
     MulCarry3,
@@ -137,7 +134,7 @@ impl MachineChip for RangeBoolChip {
         // Intentionally empty. Logup isn't used.
     }
 
-    fn add_constraints<E: stwo_prover::constraint_framework::EvalAtRow>(
+    fn add_constraints<E: stwo_constraint_framework::EvalAtRow>(
         eval: &mut E,
         trace_eval: &TraceEval<E>,
         _lookup_elements: &AllLookupElements,
@@ -207,9 +204,9 @@ mod test {
 
     use nexus_vm::emulator::{Emulator, HarvardEmulator};
 
-    use stwo_prover::constraint_framework::TraceLocationAllocator;
+    use stwo_constraint_framework::TraceLocationAllocator;
 
-    use stwo_prover::core::prover::prove;
+    use stwo::prover::prove;
 
     pub type Component = MachineComponent<RangeBoolChip>;
 

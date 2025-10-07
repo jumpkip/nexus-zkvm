@@ -442,13 +442,11 @@ fn debug_segment_info(segment: &ProgramHeader, section_map: &HashMap<&str, (u64,
     println!(
         "  LOADABLE: 0x{:08x} -> 0x{:08x}",
         segment.p_offset,
-        segment.p_offset + segment.p_memsz
+        segment.p_offset + segment.p_filesz
     );
 
     for (key, (start, end)) in section_map {
-        if !(*end < segment.p_offset
-            || *start > segment.p_offset + segment.p_offset + segment.p_filesz)
-        {
+        if !(*end < segment.p_offset || *start > segment.p_offset + segment.p_filesz) {
             println!("Section {}: 0x{:08x} -> 0x{:08x}", key, start, end);
         }
     }
@@ -491,8 +489,9 @@ pub fn parse_segments(elf: &ElfBytes<LittleEndian>, data: &[u8]) -> Result<Parse
         .iter()
         .filter(|x| x.p_type == abi::PT_LOAD || x.p_type == abi::PT_NOTE)
     {
-        #[cfg(debug_assertions)]
-        debug_segment_info(&segment, &section_map);
+        // TODO: Uncomment this when we need to debug the segment info
+        // #[cfg(debug_assertions)]
+        // debug_segment_info(&segment, &section_map);
         // We assume the executable section (PF_X or .text section) is the first executable segment,
         // thus it has the lower address, we use this information to figure out the base address of the program
         if (segment.p_flags & abi::PF_X) != 0 && base_address > segment.p_vaddr {
